@@ -1,0 +1,27 @@
+# Chatterbox TTS Audiobook Edition - Requirements
+# CPU-only version - no GPU required
+
+# Core PyTorch dependencies (CPU-only)
+torch>=2.4.0
+torchaudio>=2.4.0
+
+# Core Chatterbox TTS dependencies
+numpy>=1.26.0
+resampy>=0.4.3
+librosa>=0.10.0
+s3tokenizer
+transformers>=4.46.0
+diffusers>=0.29.0
+resemble-perth>=1.0.1
+omegaconf>=2.3.0
+conformer>=0.3.2
+spacy>=3.4.0
+
+# Web interface
+gradio
+
+# Installation Notes:
+# 1. Requires Python 3.10+
+# 2. CPU-only - no GPU needed
+# 3. Install: pip install -r requirements.txt
+# 4. Then: pip install -e .

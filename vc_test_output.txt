@@ -1,0 +1,7 @@
+* Running on local URL:  http://127.0.0.1:7860
+* Running on public URL: https://9809ac215948f8cf28.gradio.live
+
+This share link is temporary and will last for up to 1 week (best effort). For free permanent hosting and GPU upgrades, run `gradio deploy` from the terminal in the working directory to deploy to Hugging Face Spaces (https://huggingface.co/spaces)
+Using local model files from models/ folder
+loaded PerthNet (Implicit) at step 250,000
+loaded PerthNet (Implicit) at step 250,000
