@@ -194,6 +194,26 @@ echo "To start Chatterbox TTS:"
 echo "1. Run ./launch_audiobook.sh (recommended)"
 echo "2. Or manually: source venv/bin/activate && python3 gradio_tts_app_audiobook.py"
 echo ""
+echo "Creating double-click launchers (Desktop entry + Mint menu)..."
+APP_DIR="$(pwd)"
+cat > Chatterbox-Audiobook.desktop <<EOF
+[Desktop Entry]
+Type=Application
+Name=Chatterbox Audiobook
+Comment=Launch Chatterbox TTS Audiobook Generator (23 languages + Bangla, CPU mode)
+Exec=bash -c 'cd "$APP_DIR" && ./launch_audiobook.sh; echo ""; read -p "Press Enter to close this window..."'
+Path=$APP_DIR
+Terminal=true
+Categories=AudioVideo;Audio;
+StartupNotify=false
+EOF
+chmod +x Chatterbox-Audiobook.desktop
+mkdir -p ~/.local/share/applications
+cp Chatterbox-Audiobook.desktop ~/.local/share/applications/
+gio set ~/.local/share/applications/Chatterbox-Audiobook.desktop metadata::trusted true 2>/dev/null || true
+update-desktop-database ~/.local/share/applications 2>/dev/null || true
+echo "Launchers ready: ./Chatterbox-Audiobook.desktop + Mint menu (Super key -> Chatterbox)."
+echo ""
 echo "Perfect for:"
 echo "- Voice cloning for audiobook narration"
 echo "- Multiple character voices"
