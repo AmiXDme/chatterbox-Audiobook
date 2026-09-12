@@ -102,6 +102,9 @@ The stock multilingual model covers 23 languages but **not Bengali**. This app a
 - **Public link** — disabled (`share=False` in code; re-enable only if you need off-WiFi access and accept the exposure)
 - Phone is a remote control: generation still runs on the PC; mic recording works from mobile browsers
 
+### 🖥️ Terminal Twin (`terminal_app.py`, `./launch_terminal.sh`)
+The full Gradio UI cloned for the terminal — Bangla + English, quick TTS, single/multi audiobooks — **zero copied logic**: it imports and calls the exact same engine functions as the GUI buttons, so the two can never drift apart. Same models (lazy singletons, one-at-a-time), same `voice_library/` + `audiobook_projects/` (start a book in terminal, resume it in the browser and vice versa), same heartbeat/ETA/waveform terminal output. **Surprise inside: watch-folder batch mode** — drop `.txt` files in a folder, each becomes an audiobook. `Ctrl+C` cancels any job (partial work kept).
+
 ### 🎭 Voice Management, 🎚️ Normalization, 🔇 Return Pauses, 📋 Batch
 Unchanged from before: voice library with clone-from-sample, professional loudness presets, 0.1 s pause per line break, batch multi-file processing. See original sections below.
 
