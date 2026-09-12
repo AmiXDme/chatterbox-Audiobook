@@ -62,12 +62,28 @@ def ask_yn(prompt, default=False):
     return raw in ("y", "yes")
 
 
+def clean_path(raw):
+    """Normalize a pasted/drag-dropped path: strip quotes, unescape spaces."""
+    p = (raw or "").strip()
+    if len(p) >= 2 and p[0] == p[-1] and p[0] in ("'", '"'):
+        p = p[1:-1]
+    p = p.replace("\\ ", " ")
+    return os.path.expanduser(p)
+
+
 def ask_text(prompt):
-    """Single line, or @/path/to/file.txt to load text from a file."""
-    raw = input(f"{prompt} (or @file.txt): ").strip()
+    """Type text directly, @/path/to/file.txt, or drag-and-drop a .txt file
+    (dropped paths are detected automatically, @ optional)."""
+    raw = input(f"{prompt} (type, @file.txt, or drag-and-drop): ").strip()
     if raw.startswith("@"):
-        path = raw[1:]
-        with open(os.path.expanduser(path), encoding="utf-8-sig") as f:
+        path = clean_path(raw[1:])
+        with open(path, encoding="utf-8-sig") as f:
+            print(f"  Loaded {os.path.basename(path)}")
+            return f.read()
+    maybe = clean_path(raw)
+    if maybe.lower().endswith(".txt") and os.path.isfile(maybe):
+        with open(maybe, encoding="utf-8-sig") as f:
+            print(f"  Loaded {os.path.basename(maybe)}")
             return f.read()
     return raw
 
@@ -87,7 +103,9 @@ def choose_voice(profile_only=False):
     print("Voice:")
     name = pick(choices, "Voice")
     if not name:
-        audio = input("Audio file path: ").strip()
+        audio = clean_path(input("Audio file path (or drag-and-drop): ").strip())
+        if not os.path.isfile(audio):
+            raise SystemExit(f"❌ File not found: {audio}")
         return None, audio, 0.5, 0.5, 0.8, os.path.basename(audio)
     audio, exag, cfg, temp, _comp, status = load_voice_for_tts(SAVED_VOICE_LIBRARY_PATH, name)
     print(f"  {status}")
@@ -223,8 +241,8 @@ def flow_multi():
 def flow_watch():
     """SURPRISE: drop .txt files in a folder -> each becomes an audiobook."""
     print("\n--- Watch-folder batch (surprise mode) ---")
-    folder = input("Folder to watch (empty = ./terminal_inbox): ").strip() or "./terminal_inbox"
-    folder = os.path.abspath(os.path.expanduser(folder))
+    folder = clean_path(input("Folder to watch (empty = ./terminal_inbox, or drag-and-drop): ").strip() or "./terminal_inbox")
+    folder = os.path.abspath(folder)
     os.makedirs(folder, exist_ok=True)
     print(f"Drop .txt files into:\n  {folder}\nPress Enter to scan (Ctrl+C quits)...")
     try:
@@ -264,6 +282,12 @@ def main():
     print("  Chatterbox Terminal  (bn/en: quick, single, multi + watch)")
     print("  Same engines, models, voices and projects as the browser UI.")
     print("=" * 60)
+    enc = sys.stdin.encoding or "unknown"
+    print(f"  Terminal encoding: {enc}")
+    if enc.lower().replace("-", "") not in ("utf8", "utf8sig"):
+        print("  ⚠️ WARNING: terminal is not UTF-8 — Bengali input may arrive "
+              "garbled. Run with: PYTHONUTF8=1 python3 terminal_app.py "
+              "or: export LC_ALL=C.UTF-8")
     while True:
         print("\n1. Quick speech  2. Single-voice audiobook  3. Multi-voice audiobook")
         print("4. Watch-folder batch  5. Quit")
@@ -288,8 +312,10 @@ def main():
                 print("Pick 1-5.")
         except SystemExit as e:
             print(e)
-        except Exception as e:  # keep the menu alive no matter what
-            print(f"❌ Error: {e}")
+        except Exception:
+            import traceback
+            print("❌ Error (full traceback — paste this when reporting):")
+            traceback.print_exc()
         finally:
             TTS_CANCEL_EVENT.clear()
             TTS_PAUSE_EVENT.clear()
