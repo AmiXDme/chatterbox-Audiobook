@@ -188,10 +188,19 @@ def save_voice_profile(
         if audio_file is not None:
             audio_path = os.path.join(profile_dir, "voice.wav")
             if isinstance(audio_file, str):
-                # File path provided
                 shutil.copy2(audio_file, audio_path)
+            elif isinstance(audio_file, tuple) and len(audio_file) == 2:
+                # Gradio Audio component returns (sample_rate, numpy_array)
+                import numpy as np
+                import wave
+                sr, audio_data = audio_file
+                audio_int16 = (np.asarray(audio_data) * 32767).astype(np.int16) if np.asarray(audio_data).dtype == np.float32 or np.asarray(audio_data).dtype == np.float64 else np.asarray(audio_data).astype(np.int16)
+                with wave.open(audio_path, 'wb') as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(sr)
+                    wf.writeframes(audio_int16.tobytes())
             elif hasattr(audio_file, 'name'):
-                # Gradio file object
                 shutil.copy2(audio_file.name, audio_path)
             else:
                 return "❌ Invalid audio file format"

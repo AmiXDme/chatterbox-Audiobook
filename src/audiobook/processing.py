@@ -371,7 +371,7 @@ def _filter_problematic_short_chunks(chunks: List[str], voice_assignments: Dict[
 # PHASE 4 REFACTOR: Adding audio processing functions to this module
 # Originally from gradio_tts_app_audiobook.py save_audio_chunks() function
 
-def save_audio_chunks(audio_chunks: List[np.ndarray], sample_rate: int, project_name: str, output_dir: str = "audiobook_projects") -> Tuple[List[str], str]:
+def save_audio_chunks(audio_chunks: List[np.ndarray], sample_rate: int, project_name: str, output_dir: str = "audiobook_projects", start_index: int = 1) -> Tuple[List[str], str]:
     """
     Save audio chunks as numbered WAV files
     
@@ -380,6 +380,7 @@ def save_audio_chunks(audio_chunks: List[np.ndarray], sample_rate: int, project_
         sample_rate: Sample rate for audio files
         project_name: Name of the project
         output_dir: Directory to save project files
+        start_index: Starting number for file naming (default 1)
         
     Returns:
         tuple: (list of saved file paths, project directory path)
@@ -397,8 +398,8 @@ def save_audio_chunks(audio_chunks: List[np.ndarray], sample_rate: int, project_
     
     saved_files = []
     
-    for i, audio_chunk in enumerate(audio_chunks, 1):
-        filename = f"{safe_project_name}_{i:03d}.wav"
+    for i, audio_chunk in enumerate(audio_chunks):
+        filename = f"{safe_project_name}_{start_index + i:03d}.wav"
         filepath = os.path.join(project_dir, filename)
         
         # Save as WAV file
@@ -417,19 +418,19 @@ def save_audio_chunks(audio_chunks: List[np.ndarray], sample_rate: int, project_
 
 
 # PHASE 4 REFACTOR: Adding extract_audio_segment function from gradio_tts_app_audiobook.py
-def extract_audio_segment(audio_data, start_time: float = None, end_time: float = None) -> tuple:
+def extract_audio_segment(audio_data, start_time: float = None, end_time: float = None, sample_rate: int = 24000) -> tuple:
     """Extract a segment from audio data.
     
     Args:
         audio_data: Numpy array of audio data
         start_time: Start time in seconds (None for beginning)
         end_time: End time in seconds (None for end)
+        sample_rate: Audio sample rate in Hz (default 24000)
         
     Returns:
         tuple: (status_message, extracted_audio_data)
     """
     try:
-        sample_rate = 24000  # Default sample rate
         
         if audio_data is None or len(audio_data) == 0:
             return "❌ No audio data to extract from", None
@@ -465,8 +466,9 @@ def process_text_for_pauses(text: str, pause_duration: float = 0.1) -> tuple:
     Returns:
         tuple: (processed_text, return_count, total_pause_duration)
     """
-    # Count line breaks (both \n and \r\n)
-    return_count = text.count('\n') + text.count('\r')
+    # Count line breaks — normalize first to avoid double-counting \r\n
+    normalized = text.replace('\r\n', '\n')
+    return_count = normalized.count('\n') + normalized.count('\r')
     total_pause_duration = return_count * pause_duration
     
     # Clean up text for TTS (normalize line breaks but keep content)
@@ -602,8 +604,6 @@ def map_line_breaks_to_chunks(original_text: str, chunks: List[str], pause_durat
             chunk_pause_map: Dict mapping chunk index to pause duration
             total_pause_duration: Total pause time across all chunks
     """
-    import re
-    
     chunk_pause_map = {}
     total_pause_duration = 0.0
     
@@ -671,7 +671,6 @@ def map_line_breaks_to_chunks(original_text: str, chunks: List[str], pause_durat
 
 def chunk_text_by_sentences_local(text, max_words=50):
     """Local copy of sentence chunking to avoid circular imports."""
-    import re
     
     # Split into sentences using common sentence endings
     sentences = re.split(r'(?<=[.!?])\s+', text.strip())
@@ -718,8 +717,6 @@ def chunk_text_with_line_break_priority(text: str, max_words: int = 50, pause_du
             chunks_with_pauses: List of dicts with 'text' and 'pause_duration' keys
             total_pause_duration: Total pause time across all chunks
     """
-    import re
-    
     chunks_with_pauses = []
     total_pause_duration = 0.0
     
@@ -764,7 +761,6 @@ def chunk_text_with_line_break_priority(text: str, max_words: int = 50, pause_du
 
 def parse_multi_voice_text_local(text):
     """Local copy of multi-voice text parsing to avoid circular imports."""
-    import re
     
     # Pattern to match [CharacterName] at the beginning of lines
     pattern = r'^\[([^\]]+)\]\s*(.*?)(?=^\[|\Z)'
@@ -797,26 +793,12 @@ def chunk_multi_voice_text_with_line_break_priority(text: str, max_words: int = 
             segments_with_pauses: List of dicts with 'voice', 'text', and 'pause_duration' keys
             total_pause_duration: Total pause time across all segments
     """
-    import re
-    
-    # Add debugging output for the input text
-    print(f"🔍 DEBUG: chunk_multi_voice_text_with_line_break_priority input:")
-    print(f"🔍 DEBUG: Input text length: {len(text)} characters")
-    print(f"🔍 DEBUG: Line breaks in input: {text.count(chr(10))} \\n chars, {text.count(chr(13))} \\r chars")
-    print(f"🔍 DEBUG: First 200 chars: {repr(text[:200])}")
-    
-    # NEW APPROACH: Process line breaks in the full text before voice parsing
-    # Split the entire text by voice segments while preserving line breaks
     segments_with_pauses = []
     total_pause_duration = 0.0
     
     # Find all voice segments with their positions, preserving everything in between
     voice_pattern = r'(\[([^\]]+)\]\s*)'
     split_parts = re.split(voice_pattern, text)
-    
-    print(f"🔍 DEBUG: Split text into {len(split_parts)} parts")
-    for i, part in enumerate(split_parts):
-        print(f"🔍 DEBUG: Part {i}: {repr(part[:50])}")
     
     current_voice = None
     
@@ -828,7 +810,6 @@ def chunk_multi_voice_text_with_line_break_priority(text: str, max_words: int = 
         if i + 2 < len(split_parts) and re.match(r'\[([^\]]+)\]\s*', part):
             # This is a voice tag, extract the voice name
             current_voice = split_parts[i + 1]  # The captured voice name
-            print(f"🔍 DEBUG: Found voice tag: '{current_voice}'")
             
             # The content is in the next part after the voice tag and whitespace
             content_part = split_parts[i + 2] if i + 2 < len(split_parts) else ""
@@ -867,21 +848,15 @@ def chunk_multi_voice_text_with_line_break_priority(text: str, max_words: int = 
             
             i += 1
     
-    print(f"🔍 DEBUG: Final result: {len(segments_with_pauses)} segments, {total_pause_duration:.1f}s total pause time")
-    
     return segments_with_pauses, total_pause_duration
 
 
 def process_voice_content_with_line_breaks(voice_name: str, content: str, max_words: int, pause_duration: float) -> list:
     """Process voice content while preserving line breaks for pauses."""
-    import re
-    
     segments = []
     
     # Split content by line breaks, keeping the line breaks
     line_segments = re.split(r'(\n+)', content)
-    
-    print(f"🔍 DEBUG: Processing voice '{voice_name}' content split into {len(line_segments)} line segments")
     
     for i, line_segment in enumerate(line_segments):
         if not line_segment:
@@ -893,14 +868,10 @@ def process_voice_content_with_line_breaks(voice_name: str, content: str, max_wo
             line_break_count = line_segment.count('\n')
             pause_time = line_break_count * pause_duration
             
-            print(f"🔍 DEBUG: Found {line_break_count} line breaks, calculating {pause_time:.1f}s pause")
-            
             # Add pause to the previous segment if it exists and has the same voice
             if segments and segments[-1]['voice'] == voice_name:
                 segments[-1]['pause_duration'] += pause_time
                 print(f"🔇 Line breaks detected in [{voice_name}]: +{pause_time:.1f}s pause (from {line_break_count} returns)")
-            else:
-                print(f"🔍 DEBUG: No previous segment to add pause to, or voice mismatch")
             continue
         
         # This is actual text content - chunk it by sentences if needed
@@ -908,12 +879,8 @@ def process_voice_content_with_line_breaks(voice_name: str, content: str, max_wo
         if not text_content:
             continue
             
-        print(f"🔍 DEBUG: Processing text content: '{text_content[:50]}...'")
-        
         # Apply sentence chunking to this segment
         text_chunks = chunk_text_by_sentences_local(text_content, max_words)
-        
-        print(f"🔍 DEBUG: chunk_text_by_sentences_local produced {len(text_chunks)} chunks")
         
         # Add these chunks with voice assignment and initial pause duration of 0
         for chunk in text_chunks:
@@ -923,6 +890,5 @@ def process_voice_content_with_line_breaks(voice_name: str, content: str, max_wo
                     'text': chunk.strip(),
                     'pause_duration': 0.0
                 })
-                print(f"🔍 DEBUG: Added segment: voice='{voice_name}', text='{chunk.strip()[:30]}...', pause=0.0")
     
     return segments 

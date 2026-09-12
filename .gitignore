@@ -113,6 +113,9 @@ syn_out/
 checkpoints/
 /models/
 /models-multilingual/
+/models-bangla/
+vc_output/
+_working_audio/
 .gradio
 
 # Keep the Chatterbox model source code (neural network implementations)
@@ -124,6 +127,7 @@ checkpoints/
 # User data directories - keep repository clean
 venv/
 audiobook_projects/
+voice_library/
 speakers/
 source/
 audiobook_config.json

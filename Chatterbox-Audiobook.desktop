@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Chatterbox Audiobook
+Comment=Launch Chatterbox TTS Audiobook Generator (23 languages, CPU mode)
+Exec=bash -c 'cd "/home/mint/Desktop/chatterbox-Audiobook" && ./launch_audiobook.sh; echo ""; read -p "Press Enter to close this window..."'
+Path=/home/mint/Desktop/chatterbox-Audiobook
+Terminal=true
+Categories=AudioVideo;Audio;
+StartupNotify=false

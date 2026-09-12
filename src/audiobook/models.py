@@ -3,7 +3,10 @@
 import torch
 import random
 import numpy as np
-from chatterbox.mtl_tts import ChatterboxMultilingualTTS as ChatterboxTTS
+try:
+    from chatterbox.mtl_tts import ChatterboxMultilingualTTS as ChatterboxTTS
+except ImportError:
+    from src.chatterbox.mtl_tts import ChatterboxMultilingualTTS as ChatterboxTTS
 from typing import Any, Tuple, Optional
 
 
@@ -102,7 +105,8 @@ def generate_with_cpu_fallback(
     audio_prompt_path: str, 
     exaggeration: float, 
     temperature: float, 
-    cfg_weight: float
+    cfg_weight: float,
+    language_id: str = "en"
 ) -> Tuple[Any, str]:
     """Generate audio with CPU processing.
     
@@ -113,6 +117,7 @@ def generate_with_cpu_fallback(
         exaggeration: Exaggeration parameter
         temperature: Temperature parameter
         cfg_weight: CFG weight parameter
+        language_id: Language ID for multilingual TTS
         
     Returns:
         tuple: (audio_wav, device_used)
@@ -125,6 +130,7 @@ def generate_with_cpu_fallback(
             exaggeration=exaggeration,
             temperature=temperature,
             cfg_weight=cfg_weight,
+            language_id=language_id,
         )
         return wav, "CPU"
     except Exception as e:
@@ -138,7 +144,8 @@ def generate_with_retry(
     exaggeration: float, 
     temperature: float, 
     cfg_weight: float, 
-    max_retries: int = 3
+    max_retries: int = 3,
+    language_id: str = "en"
 ) -> Tuple[Any, str]:
     """Generate audio with retry mechanism for robustness.
     
@@ -150,6 +157,7 @@ def generate_with_retry(
         temperature: Temperature parameter
         cfg_weight: CFG weight parameter
         max_retries: Maximum number of retry attempts
+        language_id: Language ID for multilingual TTS
         
     Returns:
         tuple: (audio_wav, device_used)
@@ -159,7 +167,7 @@ def generate_with_retry(
     for attempt in range(max_retries):
         try:
             return generate_with_cpu_fallback(
-                model, text, audio_prompt_path, exaggeration, temperature, cfg_weight
+                model, text, audio_prompt_path, exaggeration, temperature, cfg_weight, language_id=language_id
             )
         except Exception as e:
             last_error = e

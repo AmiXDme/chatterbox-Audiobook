@@ -42,6 +42,7 @@ _MTL_MODELS_DIR = Path(__file__).resolve().parent.parent.parent / "models-multil
 # Supported languages for the multilingual model
 SUPPORTED_LANGUAGES = {
   "ar": "Arabic",
+  "bn": "Bengali (Bangla)",
   "da": "Danish",
   "de": "German",
   "el": "Greek",
@@ -113,9 +114,9 @@ def punc_norm(text: str) -> str:
     for old_char_sequence, new_char in punc_to_replace:
         text = text.replace(old_char_sequence, new_char)
 
-    # Add full stop if no ending punc
+    # Add full stop if no ending punc (। is the Bengali dari)
     text = text.rstrip(" ")
-    sentence_enders = {".", "!", "?", "-", ",", "、", "，", "。", "？", "！"}
+    sentence_enders = {".", "!", "?", "-", ",", "、", "，", "。", "？", "！", "।"}
     if not any(text.endswith(p) for p in sentence_enders):
         text += "."
 
@@ -176,31 +177,45 @@ class ChatterboxMultilingualTTS:
 
         map_location = torch.device('cpu')
 
+        import time as _lt
+        print("[MODEL] Loading ve.pt (voice encoder)...", flush=True)
+        _w0 = _lt.time()
         ve = VoiceEncoder()
         ve.load_state_dict(
             torch.load(ckpt_dir / "ve.pt", map_location=map_location, weights_only=True)
         )
         ve.to(device).eval()
+        print(f"[MODEL] ve.pt ready in {_lt.time()-_w0:.1f}s", flush=True)
 
+        print(f"[MODEL] Loading {t3_model} (2GB+, terminal quiet 30-120s)...", flush=True)
+        _w0 = _lt.time()
         t3 = T3(T3Config.multilingual())
         t3_state = load_safetensors(ckpt_dir / t3_model)
         if "model" in t3_state.keys():
             t3_state = t3_state["model"][0]
         t3.load_state_dict(t3_state)
         t3.to(device).eval()
+        print(f"[MODEL] {t3_model} ready in {_lt.time()-_w0:.1f}s", flush=True)
 
+        print("[MODEL] Loading s3gen.pt ...", flush=True)
+        _w0 = _lt.time()
         s3gen = S3Gen()
         s3gen.load_state_dict(
             torch.load(ckpt_dir / "s3gen.pt", map_location=map_location, weights_only=True)
         )
         s3gen.to(device).eval()
+        print(f"[MODEL] s3gen.pt ready in {_lt.time()-_w0:.1f}s", flush=True)
 
+        print("[MODEL] Loading tokenizer + Cangjie mapping (may hit network)...", flush=True)
+        _w0 = _lt.time()
         tokenizer = MTLTokenizer(
             str(ckpt_dir / "grapheme_mtl_merged_expanded_v1.json")
         )
+        print(f"[MODEL] Tokenizer ready in {_lt.time()-_w0:.1f}s", flush=True)
 
         conds = None
         if (builtin_voice := ckpt_dir / "conds.pt").exists():
+            print("[MODEL] Loading conds.pt ...", flush=True)
             states = torch.load(builtin_voice, map_location=map_location, weights_only=True)
             conds = Conditionals(T3Cond(**states['t3']), states['gen']).to(device)
 
@@ -220,39 +235,50 @@ class ChatterboxMultilingualTTS:
             files_to_check = MTL_MODEL_FILES + [t3_model]
             all_exist = all((_MTL_MODELS_DIR / f).exists() for f in files_to_check)
             if all_exist:
-                print("Using local multilingual model files from models-multilingual/ folder")
+                print("Using local multilingual model files from models-multilingual/ folder", flush=True)
             else:
-                print(f"Downloading multilingual model files to {_MTL_MODELS_DIR} ...")
+                print(f"Downloading multilingual model files to {_MTL_MODELS_DIR} ...", flush=True)
                 for fpath in files_to_check:
                     dest = _MTL_MODELS_DIR / fpath
                     if not dest.exists():
+                        print(f"  Downloading {fpath} (large file, terminal quiet until done)...", flush=True)
                         hf_hub_download(repo_id=REPO_ID, filename=fpath, local_dir=str(_MTL_MODELS_DIR))
-                        print(f"  Downloaded: {fpath}")
+                        print(f"  Downloaded: {fpath}", flush=True)
                     else:
-                        print(f"  Already exists: {fpath}")
-                print("All multilingual model files ready.")
+                        print(f"  Already exists: {fpath}", flush=True)
+                print("All multilingual model files ready.", flush=True)
 
             return cls.from_local(_MTL_MODELS_DIR, device, t3_model=t3_model)
 
+    @torch.inference_mode()
     def prepare_conditionals(self, wav_fpath, exaggeration=0.5):
+        import time as _t
+        _p0 = _t.time()
         ## Load reference wav
         s3gen_ref_wav, _sr = librosa.load(wav_fpath, sr=S3GEN_SR)
 
         ref_16k_wav = librosa.resample(s3gen_ref_wav, orig_sr=S3GEN_SR, target_sr=S3_SR)
+        print(f"🎙️ [TTS] Voice setup: loaded+resampled {len(s3gen_ref_wav)/S3GEN_SR:.1f}s in {_t.time()-_p0:.1f}s", flush=True)
 
         s3gen_ref_wav = s3gen_ref_wav[:self.DEC_COND_LEN]
+        _e0 = _t.time()
         s3gen_ref_dict = self.s3gen.embed_ref(s3gen_ref_wav, S3GEN_SR, device=self.device)
+        print(f"🎙️ [TTS] Voice setup: S3Gen embedding in {_t.time()-_e0:.1f}s", flush=True)
 
         # Speech cond prompt tokens
         t3_cond_prompt_tokens = None
         if plen := self.t3.hp.speech_cond_prompt_len:
+            _k0 = _t.time()
             s3_tokzr = self.s3gen.tokenizer
             t3_cond_prompt_tokens, _ = s3_tokzr.forward([ref_16k_wav[:self.ENC_COND_LEN]], max_len=plen)
             t3_cond_prompt_tokens = torch.atleast_2d(t3_cond_prompt_tokens).to(self.device)
+            print(f"🎙️ [TTS] Voice setup: prompt tokens in {_t.time()-_k0:.1f}s", flush=True)
 
         # Voice-encoder speaker embedding
+        _v0 = _t.time()
         ve_embed = torch.from_numpy(self.ve.embeds_from_wavs([ref_16k_wav], sample_rate=S3_SR))
         ve_embed = ve_embed.mean(axis=0, keepdim=True).to(self.device)
+        print(f"🎙️ [TTS] Voice setup: speaker embedding in {_t.time()-_v0:.1f}s (total {_t.time()-_p0:.1f}s)", flush=True)
 
         t3_cond = T3Cond(
             speaker_emb=ve_embed,
@@ -312,6 +338,8 @@ class ChatterboxMultilingualTTS:
         text_tokens = self.tokenizer.text_to_tokens(
             text, language_id=language_id.lower() if language_id else None
         ).to(self.device)
+        # NOTE: must always duplicate even when cfg_weight==0 — T3 hard-indexes
+        # batch[1] for the CFG unconditional branch (text_emb[1].zero_()).
         text_tokens = torch.cat([text_tokens, text_tokens], dim=0)  # Need two seqs for CFG
 
         sot = self.t3.hp.start_text_token
@@ -320,7 +348,9 @@ class ChatterboxMultilingualTTS:
         text_tokens = F.pad(text_tokens, (0, 1), value=eot)
 
         with torch.inference_mode():
-            print(f"🔤 [TTS] Tokenizing text (language={language_id})...")
+            import time as _pt
+            print(f"🔤 [TTS] Tokenizing text (language={language_id})...", flush=True)
+            _a0 = _pt.time()
             speech_tokens = self.t3.inference(
                 t3_cond=self.conds.t3,
                 text_tokens=text_tokens,
@@ -331,17 +361,23 @@ class ChatterboxMultilingualTTS:
                 min_p=min_p,
                 top_p=top_p,
             )
+            _t3_dur = _pt.time() - _a0
             # Extract only the conditional batch.
             speech_tokens = speech_tokens[0]
 
             speech_tokens = drop_invalid_tokens(speech_tokens)
             speech_tokens = speech_tokens.to(self.device)
+            _n_tok = int(speech_tokens.shape[-1])
+            _tps = _n_tok / _t3_dur if _t3_dur > 0 else 0
+            print(f"🧠 [TTS] T3 done: {_n_tok} speech tokens in {_t3_dur:.1f}s ({_tps:.1f} tok/s)", flush=True)
 
-            print(f"🎻 [TTS] Decoding {speech_tokens.shape[-1]} speech tokens with S3Gen...")
+            print(f"🎻 [TTS] Decoding {_n_tok} speech tokens with S3Gen...", flush=True)
+            _b0 = _pt.time()
             wav, _ = self.s3gen.inference(
                 speech_tokens=speech_tokens,
                 ref_dict=self.conds.gen,
             )
+            print(f"🔊 [TTS] S3Gen done in {_pt.time()-_b0:.1f}s", flush=True)
             wav = wav.squeeze(0).detach().cpu().numpy()
 
             # Drop the final speech token's audio: it is emitted just before

@@ -1,82 +1,156 @@
 # 🎧 Chatterbox Audiobook Generator
 
-**This is a work in progress. You can consider this a pre-launch repo at the moment, but if you find bugs, please put them in the issues area. Thank you.**
-**Transform your text into high-quality audiobooks with advanced TTS models, voice cloning, and professional volume normalization.**
+**Transform your text into high-quality audiobooks with the ResembleAI Chatterbox Multilingual model (23 languages), voice cloning, multi-character voices, and professional volume normalization. CPU-only — no GPU needed.**
 
-## 🚀 Quick Start
+> This README documents the full Linux port + realtime upgrade session: every fix, feature, and lesson learned is listed in [Session Changelog](#session-changelog-what-was-done) at the bottom.
 
-### 1. Install Dependencies
+## 🚀 Quick Start (Linux)
+
+### 1. Install (first time only)
 ```bash
-./install-audiobook.bat
+cd ~/Desktop/chatterbox-Audiobook
+sudo apt install -y python3.12-venv   # Mint/Ubuntu need this once (python3-venv is not preinstalled)
+./install-audiobook.sh
 ```
+This creates `venv/`, installs CPU PyTorch + dependencies, and downloads the multilingual model (~1.5 GB) into `models-multilingual/`. The installer self-heals a missing `python3-venv` (auto-installs via apt), warns if disk space is under 6 GB, and offers to create an 8 GB swapfile (recommended on <16 GB RAM — prevents OOM kills).
 
-### 3. Launch the Application
+### 2. Launch
 ```bash
-./launch_audiobook.bat
+./launch_audiobook.sh
 ```
+Open the printed link (`http://127.0.0.1:7860`). Available scripts:
 
-The web interface will open automatically in your browser at `http://localhost:7860`
+**No model preload by design:** the UI opens in seconds with zero models loaded. **You** pick the language first — the right model (multilingual or Bangla) loads on your first Generate/Create click via `load_model(language_id)`. Bengali-only users never download or load the multilingual weights at all.
+
+**Strict one-model-at-a-time:** picking EN runs *only* multilingual; picking BN evicts multilingual and runs *only* Bangla (and vice versa) — caches cleared + RAM trimmed + UI state synced, logged as `[MEM] Evicted …`. Alternating languages reloads each switch; sticking to one never reloads.
+
+| Script | Purpose |
+|---|---|
+| `install-audiobook.sh` | Full installer (venv, deps, model download) |
+| `launch_audiobook.sh` | Main launcher (recommended) |
+| `launch_local.sh` | Localhost only |
+| `launch_network.sh` | LAN access (`0.0.0.0`, uses `hostname -I`) |
+
+(Windows `.bat` launchers still exist and work on Windows.)
+
+### 3. Double-click launch (no terminal typing)
+- **Mint menu (recommended):** Super key → type `Chatterbox` → click. A `Chatterbox-Audiobook.desktop` entry is registered in `~/.local/share/applications/` (add to panel/desktop via right-click).
+- **Source folder:** double-click `Chatterbox-Audiobook.desktop` inside the project folder (Nemo: right-click → Allow Launching on first use).
+- **Sigma File Manager:** Sigma does not pass filenames to helper apps, so `.sh` double-click can't auto-run a terminal there. Use the Mint menu entry, or right-click empty space → Open in Terminal → `./launch_audiobook.sh`.
+
+---
+
+## 📁 Where Everything Lives (all inside the source folder)
+
+| What | Path |
+|---|---|
+| Virtual environment | `venv/` |
+| Multilingual TTS model, all 23 languages (~1.5 GB) | `models-multilingual/` (`ve.pt`, `t3_mtl23ls_v3.safetensors`, `s3gen.pt`, `grapheme_mtl_merged_expanded_v1.json`, `conds.pt`, `Cangjie5_TC.json`) |
+| Voice Conversion model (~1 GB, downloaded on first VC use) | `models/` (`s3gen.pt`, `conds.pt`) |
+| Your voice profiles | `voice_library/<name>/` (`voice.wav` + `config.json`) |
+| Generated audiobooks (per-chunk WAVs + metadata) | `audiobook_projects/<project>/` |
+| Voice conversion outputs | `vc_output/<source>_<timestamp>/` (per-chunk files + `*_converted_full.wav`) |
+| Bengali TTS model (~2 GB, first Bengali use) | `models-bangla/` (`t3_cfg.safetensors`, `s3gen.safetensors`, `ve.safetensors`, `tokenizer.json`, `conds.pt`) |
+| App config | `audiobook_config.json` |
+
+Outside the folder, only two normal things: the `python3.12-venv` system package (via apt) and the pip download cache (`~/.cache/pip`, cleanable with `pip cache purge`).
 
 ---
 
 ## ✨ Features
 
-### 📚 **Audiobook Creation**
-- **Single Voice**: Generate entire audiobooks with one consistent voice
-- **Multi-Voice**: Create dynamic audiobooks with multiple characters
-- **Custom Voices**: Clone voices from audio samples for personalized narration
-- **Professional Volume Normalization**: Ensure consistent audio levels across all voices
-- **📋 Text Queuing System** ⭐ *NEW*: Upload books in any size chapters and generate continuously
-- **🔄 Chunk-Based Processing** ⭐ *NEW*: Improved reliability for longer text generations
+### 📚 Audiobook Creation (single + multi-voice)
+- 50-word smart chunks (sentence boundaries, line-break pauses preserved)
+- Per-chunk WAVs saved immediately + resume support (re-run picks up missing chunks)
+- Character voices via `[Character]` tags, per-character volume settings
+- Volume normalization presets: audiobook −18 dB, podcast −16 dB, broadcast −23 dB
 
-### 🎵 **Audio Processing**
-- **Smart Cleanup**: Remove unwanted silence and audio artifacts
-- **Volume Normalization**: Professional-grade volume balancing for all voices
-- **Real-time Audio Analysis**: Live volume level monitoring and feedback
-- **Preview System**: Test settings before applying to entire projects
-- **Batch Processing**: Process multiple projects efficiently
-- **Quality Control**: Advanced audio optimization tools
-- **🎯 Enhanced Audio Quality** ⭐ *NEW*: Improved P-top and minimum P parameters for better voice generation
+### ⚡ Realtime Generation Engine (single-voice, multi-voice AND voice conversion)
+- **Live streaming UI** — partial audio, status, and timing refresh after every chunk (generator yields, original styling kept)
+- **Timing panel** — start stamp, elapsed, ETA, projected end clock time (`ends ~14:35:10`)
+- **Terminal heartbeat** — timestamped tick every 5 s (chunk X/Y, elapsed, ETA, tokens, **RAM MB**); pause-aware; job-id guarded; 30-min stale-thread guard
+- **🛑 Cancel** — stops after the current chunk, partial result kept (audiobooks can be resumed later)
+- **⏸️ Pause / ▶️ Resume** (TTS tabs) — gate checked before every chunk, button label toggles live
+- **Skip-and-continue** — a failed chunk is recorded and skipped instead of killing a hours-long run; failures listed at the end
+- **Current chunk text** — live `Now: chunk 12/340 [Narrator]: "..."` display (HTML-escaped)
+- **Model-phase logs** — voice-setup step timings (load/resample/embed/tokens/speaker), T3 token count + tok/s, 100-token AR milestones, S3Gen flow vs vocoder split, tokenizer chars→tokens, per-segment **×realtime factor**
+- **Session odometer** — every finished job prints running totals (`📊 [SESSION] ... → 124.6 min audio in 18.42 h`)
+- **Multi-voice conds cache** — voice conditioning embedded once per voice (not per chunk); 200-chunk books save minutes
+- **Job framing everywhere** — `@logged_job` start/finish/duration on batch, legacy-audiobook, WAV-combine, regen, clean, analyze (nothing runs silent)
+- **Unbuffered output** — all launchers run `python3 -u`, so every line appears instantly
+- **Startup breadcrumbs** — torch/gradio/stack/UI-build/model-weight progress markers so cold starts never look dead
 
-### 🎭 **Voice Management**
-- **Voice Library**: Organize and manage your voice collection
-- **Voice Cloning**: Create custom voices from audio samples
-- **Volume Settings**: Configure target volume levels for each voice
-- **Professional Presets**: Industry-standard volume levels (audiobook, podcast, broadcast)
-- **Character Assignment**: Map specific voices to story characters
+### 🔄 Voice Conversion Studio
+- Any-length source audio → auto-split into **30 s chunks** → converted → stitched with 10 ms edge fades (no clicks)
+- Per-chunk retry (2×), per-chunk downloadable files, original-vs-converted A/B players
+- Target voice embedded once (first 10 s used); temp files cleaned automatically
 
-### 📊 **Volume Normalization System** ⭐ *NEW*
-- **Professional Standards**: Audiobook (-18 dB), Podcast (-16 dB), Broadcast (-23 dB) presets
-- **Consistent Character Voices**: All characters maintain the same volume level
-- **Real-time Analysis**: Color-coded volume status with RMS and peak level display
-- **Retroactive Normalization**: Apply volume settings to existing voice projects
-- **Multi-Voice Support**: Batch normalize all voices in multi-character audiobooks
-- **Soft Limiting**: Intelligent audio limiting to prevent distortion
+### 🇧🇩 Bengali (Bangla) — 24th Language
+The stock multilingual model covers 23 languages but **not Bengali**. This app adds it via the [**BosonLab/chatterbox-bangla**](https://huggingface.co/BosonLab/chatterbox-bangla) fine-tune (MIT license, ~99 h Bengali speech, vocab extended 704→2530):
+- **Select `Bengali (Bangla)`** in any language dropdown — TTS tab, single/multi audiobooks, batch, regen all route automatically
+- **Lazy singleton**: downloads to `models-bangla/` on first Bengali use, then reuses (terminal shows `[BN]` lines with sizes/durations)
+- **Voice cloning works the same** — any ~10 s reference voice speaks Bengali
+- **How it fits**: the fine-tune targets the English-class TTS (precomputed-conds API), so a thin `BanglaTTS` adapter makes it a drop-in everywhere; `punc_norm` respects the Bengali dari (`।`); English `from_local` auto-sizes T3 to any checkpoint vocab
+- First Bengali click downloads ~2 GB once; failures fall back to multilingual with a terminal note (never a crash)
 
-### 📖 **Text Processing**
-- **Chapter Support**: Automatic chapter detection and organization
-- **Multi-Voice Parsing**: Parse character dialogue automatically
-- **Text Validation**: Ensure proper formatting before generation
-- **📋 Queue Management** ⭐ *NEW*: Batch process multiple text files sequentially
-- **🔇 Return Pause System** ⭐ *NEW*: Automatic pause insertion based on line breaks for natural speech flow
+### 📱 Phone Access
+- **LAN link + QR in terminal** — server binds `0.0.0.0`; on launch the terminal prints `http://<lan-ip>:7860` plus a scannable QR code (same WiFi, trusted networks only)
+- **Public link** — disabled (`share=False` in code; re-enable only if you need off-WiFi access and accept the exposure)
+- Phone is a remote control: generation still runs on the PC; mic recording works from mobile browsers
+
+### 🎭 Voice Management, 🎚️ Normalization, 🔇 Return Pauses, 📋 Batch
+Unchanged from before: voice library with clone-from-sample, professional loudness presets, 0.1 s pause per line break, batch multi-file processing. See original sections below.
+
+### 🌍 Per-Language Sample Text
+Switching the language dropdown auto-fills a native sample sentence (24 languages, incl. Bengali) — only when the box is empty or still holds a previous sample; your own typed text is never overwritten. Applies to the TTS, single-voice, and multi-voice tabs.
 
 ---
 
-## 🎭 Custom Audiobook Processing Pipeline ⭐ *NEW*
+## 🎤 Voice Reference Rules (model limits — not configurable)
 
-Our advanced text processing pipeline transforms your written content into natural-sounding audiobooks with intelligent pause placement and character flow management.
+| Input | Limit | Why |
+|---|---|---|
+| TTS reference voice | **10 s max** (first 10 s used) | `DEC_COND_LEN = 10 × 24,000 Hz` embedding window (`mtl_tts.py`) |
+| → of which for T3 prompt tokens | **6 s** | 150-token slot ÷ 25 tok/s (`t3_config.py`, `s3tokenizer.py`) |
+| VC target voice | **10 s max** | Same embedding window (`vc.py`) |
+| VC source audio | **No cap** (we chunk at 30 s) | Full file tokenized; cost scales linearly (~25 tok/s) |
+| Book text | **No cap** | 50-word chunking + resume |
 
-### 🔇 **Return Pause System**
+Longer reference files don't crash — but extra audio is ignored (TTS/VC-target) or just slows things down. One clean 10 s clip beats five noisy minutes: the speaker embedding averages the whole clip, so silence/noise dilutes it. "Native" long-audio support would only mean smarter *selection* of the best 10 s (VAD + loudness), never bigger model windows (those are baked into the trained weights).
 
-**Automatic pause insertion based on your text formatting** - Every line break (`\n`) in your text automatically adds a 0.1-second pause to the generated audio, creating natural speech rhythms without manual intervention.
+---
 
-#### **How It Works**
-- **Line Break Detection**: System automatically counts all line breaks in your text
-- **Pause Calculation**: Each return adds exactly 0.1 seconds of silence
-- **Accumulative Pauses**: Multiple consecutive line breaks create longer pauses
-- **Universal Support**: Works with single-voice, multi-voice, and batch processing
+## 🛠️ Technical Requirements
+- **OS:** Linux (Mint/Ubuntu tested) or Windows · **Python 3.10+**
+- **RAM:** 8 GB+ recommended. 7–8 GB works for TTS/audiobooks **with swap** (installer offers an 8 GB swapfile); the VC model loads **lazily on first Convert click** (not at startup) and all loaders are **singletons** (no double-load spikes) so both weight sets are never resident unless you use VC
+- **CPU:** 4+ cores fine · **Disk:** ~6 GB free (venv + torch + models) · **No GPU needed**
 
-#### **Example Text Formatting**
+---
+
+## 🆘 Troubleshooting (every issue hit + fixed this session)
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `ensurepip is not available` / venv creation fails | Mint/Ubuntu omit `python3-venv` | `sudo apt install -y python3.12-venv` (installer now auto-installs it) |
+| Stuck at `>>>` prompt | Typed `python3.12` (opens REPL) | `exit()` or `Ctrl+D`, then run real commands |
+| `TypeError: Invalid file: None` on Generate | Clicked Generate with no voice selected | **Fixed in code** — now a red popup asks for a voice/text first |
+| Process `Killed` at startup/right after VC load | OOM: TTS+VC weights resident together | **Fixed in code** — VC loads lazily on first use + singleton caches prevent double-loads; if still killed, add swap (below) |
+| Process `Killed` during big generations | RAM spike (weights + buffers) | Close apps; add swap: `sudo fallocate -l 8G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile` (+ fstab entry for reboots) |
+| App loads model twice (`Loading...` ×2, then `Killed`) | `demo.load` re-fires per browser client | **Fixed in code** — singleton caches return `♻️ Reusing already-loaded model` |
+| Installer dies at `pip install gradio qrcode` with garbled error | Transient pip glitch (venv left without gradio) | Re-run `./venv/bin/pip install gradio qrcode pydantic`, then launch (or re-run installer) |
+| `venv/` nearly empty (no gradio, ~30 packages) | Interrupted installer run (`rm -rf venv` first) | Re-run `./install-audiobook.sh` to completion |
+| PKUSEG warning (Chinese segmentation) | Optional dep missing | Harmless warning, ignore |
+| HF Hub `unauthenticated requests` warning | No token set | Harmless; rate limits only matter for huge downloads |
+| `.sh` double-click opens editor (Sigma) | Sigma never passes filenames to handlers (verified) | Use Mint menu entry, or right-click → Open in Terminal |
+| First Bengali use downloads ~2 GB slowly | Expected one-time `models-bangla/` fetch | Watch `[BN]` lines; afterwards instant via singleton |
+| `Cangjie5_TC.json` re-downloads each launch | Tokenizer cache miss (~2 MB) | Harmless, ignore |
+
+---
+
+## 📖 Original Feature Guide (unchanged)
+
+### 🎭 Custom Audiobook Processing Pipeline
+**Return Pause System** — every line break (`\n`) adds a 0.1 s pause automatically (accumulative, works single/multi/batch):
 ```
 [Narrator] The sun was setting over the hills.
 
@@ -88,264 +162,47 @@ Let's hurry before it gets dark."
 
 [Narrator] They rushed toward the cave, hearts pounding.
 ```
-**Result**: Natural pauses between dialogue, emphasis pauses for dramatic effect, and smooth character transitions.
+**Formatting tips:** `[Name]` tags per speaker · double returns for scene changes · extra returns before reveals · single returns between speakers. Multi-voice: always use identical `[Name]` spelling.
 
-### 📝 **Text Formatting Best Practices**
+### 🎚️ Volume Setup
+Voice Library tab → upload sample → set target (−18 dB default) → save. Multi-voice: enable normalization once, all characters match. Presets: audiobook −18, podcast −16, broadcast −23 dB RMS.
 
-#### **🎭 Multi-Voice Dialogue Structure**
-```
-[Character Name] Dialogue content here.
+### 🎯 Workflow
+1. Prepare text (chapters, `[Character]` tags, line-break pauses) 2. Select/clone voices 3. Configure volume 4. Generate (watch live chunk progress + ETA) 5. Pause/Cancel freely — resume anytime 6. Collect per-chunk WAVs + full file from `audiobook_projects/<name>/`
 
-[Another Character] Response content here.
-Multiple lines can be used for the same character.
+### 📋 Formats
+In: `.txt/.md`, voice samples `.wav/.mp3/.flac`. Out: 16-bit mono `.wav` chunks + stitched full audio.
 
-[Narrator] Descriptive text and scene setting.
-```
-
-#### **🎪 Natural Flow Techniques**
-- **Paragraph Breaks**: Use double line breaks for scene transitions
-- **Emphasis Pauses**: Add extra returns before important revelations
-- **Character Separation**: Single returns between different speakers
-- **Breathing Room**: Natural pauses for complex concepts or emotional moments
-
-#### **📖 Single Voice Formatting**
-```
-Chapter content flows naturally here.
-
-New paragraphs create natural pauses.
-
-
-Extended pauses can emphasize dramatic moments.
-
-Regular text continues with normal pacing.
-```
-
-### 🔄 **Processing Pipeline Features**
-
-#### **🧠 Intelligent Text Analysis**
-- **Line Break Preservation**: Maintains your formatting intentions throughout processing
-- **Character Assignment**: Automatically maps voice tags to selected voice profiles
-- **Chunk Optimization**: Breaks long texts into optimal segments while preserving pause timing
-- **Error Recovery**: Validates text and provides helpful formatting suggestions
-
-#### **⚡ Real-Time Processing**
-- **Live Feedback**: Console output shows exactly how many pauses are being added
-- **Debug Information**: Detailed logging of pause detection and application
-- **Progress Tracking**: Monitor pause processing alongside audio generation
-- **Quality Assurance**: Automatic validation of pause placement
-
-#### **🎚️ Professional Output**
-- **Seamless Integration**: Pauses blend naturally with generated speech
-- **Volume Consistency**: Silence segments match the audio output specifications
-- **Format Compatibility**: Works with all supported audio formats and quality settings
-- **Project Preservation**: Pause information saved in project metadata for regeneration
-
-### 💡 **Pro Tips for Better Audiobooks**
-
-#### **🎯 Dialogue Formatting**
-- **Character Consistency**: Always use the same character name format `[Name]`
-- **Natural Breaks**: Place returns where a human reader would naturally pause
-- **Scene Transitions**: Use multiple returns (2-3) for major scene changes
-- **Emotional Beats**: Add single returns before/after emotional dialogue
-
-#### **📚 Chapter Structure**
-```
-Chapter 1: The Beginning
-
-Opening paragraph with scene setting.
-
-"Character dialogue with natural flow."
-
-Descriptive narrative continues.
-
-
-Major scene transition with extended pause.
-
-New section begins here.
-```
-
-#### **🎪 Advanced Techniques**
-- **Cliffhangers**: Use extended pauses before revealing crucial information
-- **Action Sequences**: Shorter, punchy sentences with minimal pauses for intensity
-- **Contemplative Moments**: Longer pauses for reflection and character development
-- **Comedic Timing**: Strategic pauses before punchlines or comedic reveals
-
-### 🔍 **Debug Output Examples**
-
-When generating your audiobook, watch for these helpful console messages:
-```
-🔇 Detected 15 line breaks → 1.5s total pause time
-🔇 Line breaks detected in [Character1]: +0.3s pause (from 3 returns)
-🔇 Chunk 2 (Narrator): Added 0.2s pause after speech
-```
-
-This real-time feedback helps you understand exactly how your formatting translates to audio timing.
+### ⚠️ Known Limitations
+- Very short multi-voice snippets can be unstable (model limitation — use fuller sentences)
+- `gradio_tts_app_audiobook_with_batch.py` is an unused alternate variant with its own old bugs; launchers use `gradio_tts_app_audiobook.py`
+- Invalid-text multi-voice chunks are skipped (recorded) rather than silence-filled
 
 ---
 
-## 🆕 Recent Improvements
+## 🗂️ Session Changelog (what was done)
 
-### 🎯 **Audio Quality Enhancements**
-We've significantly improved audio generation quality by optimizing the underlying TTS parameters:
+**Linux port:** fixed `text_processing→processing` import + missing `numpy` (`project_management.py`); `chatterbox→src.chatterbox` fallback import (`models.py`); removed duplicate `import os`; 4 executable `.sh` launchers; `.desktop` launcher + Mint-menu entry; stripped 20+ `🔍 DEBUG` prints.
 
-- **Enhanced P-top and Minimum P Settings**: Fine-tuned probability parameters for more natural speech patterns
-- **Reduced Audio Artifacts**: Better handling of pronunciation and intonation
-- **Improved Voice Consistency**: More stable voice characteristics across long generations
-- **Better Pronunciation**: Enhanced handling of complex words and names
+**`src/` bug fixes:** `vc.py` generation un-trapped from `else` + `assert→ValueError`; `\r\n` pause double-count fixed; `extract_audio_segment(sample_rate=…)` parameter; `last_updated` real timestamp; Gradio tuple-audio save support (`voice_management.py`); auto-save overwrite fixed via `start_index` + global counter (single+multi); `language_id` added to `models.generate_with_retry`; redundant `import re` ×6 removed. (Note: an early `cfg_weight>0` token-guard was reverted — T3 hard-indexes batch[1], so tokens are always duplicated.)
 
-**📝 Note for Existing Users**: 
-- Older voice profiles will continue to work as before
-- To take advantage of the new audio quality improvements, consider re-creating voice profiles
-- Existing projects remain fully compatible
+**Realtime VC upgrade** (`gradio_tts_app_audiobook.py`): `vc_convert_chunked()` generator — 30 s chunks, edge-fade stitching, retry, cancel (partial kept), per-chunk files to `vc_output/`, A/B players, progress+ETA+`ends ~HH:MM:SS`, 5 s terminal heartbeat, timing panel — original UI styling.
 
-### 📋 **Text Queuing System**
-Perfect for processing large books or multiple chapters:
+**Realtime TTS upgrade (both tabs):** cores → streaming generators (5-tuple yields); wrappers stream through (temp-voice cleanup + metadata fix-up preserved); batch caller drains; cancel + pause/resume buttons; live chunk text; skip-and-continue failures; heartbeat with stale-guard. Also fixed: resume-path 4→2 arity crash, multi-voice permanent 4→2 arity crash, TTS-tab `None` voice/text crash (`gr.Error` popups), startup OOM (lazy VC load), installer self-heal (`python3-venv`, disk check), `qrcode` dep.
 
-- **Batch Upload**: Upload multiple text files of any size
-- **Sequential Processing**: Automatically processes files one after another
-- **Progress Tracking**: Monitor generation progress across all queued items
-- **Flexible Chapter Sizes**: No restrictions on individual file length
-- **Unattended Generation**: Set up large projects and let them run automatically
+**Docs/Q&A in-session:** model locations, multilingual-only scope, 10 s/6 s reference math (150 tokens ÷ 25 tok/s), VC length rules, phone LAN+QR+public links, Mint/Sigma double-click behavior (Sigma limitation verified by test), AI-component breakdown (T3/S3/S3Gen/VE — no chatbot LLM, all local).
 
-### 🔄 **Chunk-Based TTS System**
-Enhanced the core text-to-speech engine for better reliability:
+**Deep audit (4 agents, ~9k lines):** fixed audiobook-killing `signal.alarm`-in-worker-threads bug (gated to main thread); `@torch.inference_mode()` on voice-setup paths (stops grad-graph RAM creep); `load_project_btn` + volume-component cross-tab overwrites fixed; `delete_voice` Dropdown crash fixed; duplicate refresh/download bindings removed; startup dropdown loads fixed; launch scripts `cd` to own dir; pyproject deps completed + `requires-python>=3.10`; heartbeat job-ids + progress guards. Rejected after verification: per-event queue starvation (each listener has its own queue), upstream model-math tinkering, dead-module rewrites.
 
-- **Background Chunking**: Automatically splits long texts into optimal chunks
-- **Memory Management**: Better handling of large text inputs
-- **Error Recovery**: Improved resilience during long generation sessions
-- **Consistent Quality**: Maintains voice quality across chunk boundaries
-- **Progress Feedback**: Real-time updates on generation progress
+**Terminal mega-upgrade (8 agents):** `python3 -u` everywhere; model weight per-file logs; T3 100-token milestones + tok/s; S3Gen flow/vocoder split; tokenizer + VE single-line timings; English-TTS conds mirror; multi-voice conds cache; `@logged_job` on batch/legacy/combine/regen/clean/analyze; voice-save + startup breadcrumbs; session odometer; ×realtime on every chunk.
 
----
+**Bengali support (BosonLab analysis):** stock 23-language model lacks Bengali → integrated `BosonLab/chatterbox-bangla` (MIT, ~99 h, vocab 2530) as 24th language. `tts.py from_local` auto-sizes T3 to checkpoint vocab; new `src/audiobook/bangla.py` (`BanglaTTS` adapter + lazy singleton loader into `models-bangla/` + graceful fallback); `bn` routed in TTS/single/multi/regen/legacy paths; `punc_norm` accepts `।`; `bn` in all language dropdowns.
 
-## 🎚️ Volume Normalization Guide
-
-### **Individual Voice Setup**
-1. Go to **Voice Library** tab
-2. Upload your voice sample and configure settings
-3. Set target volume level (default: -18 dB for audiobooks)
-4. Choose from professional presets or use custom levels
-5. Save voice profile with volume settings
-
-### **Multi-Voice Projects**
-1. Navigate to **Multi-Voice Audiobook Creation** tab
-2. Enable volume normalization for all voices
-3. Set target level for consistent character voices
-4. All characters will be automatically normalized during generation
-
-### **Text Queuing Workflow** ⭐ *NEW*
-1. Go to **Production Studio** tab
-2. Select "Batch Processing" mode
-3. Upload multiple text files (chapters, sections, etc.)
-4. Choose your voice and settings
-5. Start batch processing - files will generate sequentially
-6. Monitor progress and download completed audiobooks
-
-### **Professional Standards**
-- **📖 Audiobook Standard**: -18 dB RMS (recommended for most audiobooks)
-- **🎙️ Podcast Standard**: -16 dB RMS (for podcast-style content)
-- **🔇 Quiet/Comfortable**: -20 dB RMS (for quiet listening environments)
-- **🔊 Loud/Energetic**: -14 dB RMS (for dynamic, energetic content)
-- **📺 Broadcast Standard**: -23 dB RMS (for broadcast television standards)
-
----
-
-## 📁 Project Structure
-
-```
-📦 Your Audiobook Projects
-├── 🎤 speakers/           # Voice library and samples
-├── 📚 audiobook_projects/ # Generated audiobooks
-├── 🔧 src/audiobook/      # Core processing modules
-└── 📄 Generated files...  # Audio chunks and final outputs
-```
-
----
-
-## 🎯 Workflow
-
-1. **📝 Prepare Text**: Format your story with proper chapter breaks and strategic line breaks for natural pauses
-2. **🎤 Select Voices**: Choose or clone voices for your characters  
-3. **🎚️ Configure Volume**: Set professional volume levels and normalization
-4. **⚙️ Configure Settings**: Adjust quality, speed, and processing options
-5. **🎧 Generate Audio**: Create your audiobook with advanced TTS and automatic pause insertion
-6. **🧹 Clean & Optimize**: Use smart cleanup tools for perfect audio
-7. **📦 Export**: Get your finished audiobook ready for distribution
-
-### 🎭 **Enhanced Multi-Voice Workflow**
-1. **📝 Format Dialogue**: Use `[Character]` tags and strategic line breaks for natural flow
-2. **🔇 Add Return Pauses**: Place line breaks where you want natural speech pauses (0.1s each)
-3. **🎤 Assign Voices**: Map each character to their voice profile
-4. **⚡ Process with Intelligence**: Watch console output for pause detection feedback
-5. **🎧 Review & Adjust**: Listen to generated audio and refine formatting if needed
-
-### 📋 **Batch Processing Workflow** ⭐ *NEW*
-1. **📚 Organize Chapters**: Split your book into individual text files
-2. **📋 Queue Setup**: Upload all files to the batch processing system
-3. **🎤 Voice Selection**: Choose voice and configure settings once
-4. **🔄 Automated Generation**: Let the system process all files sequentially
-5. **📊 Monitor Progress**: Track completion status in real-time
-6. **📦 Collect Results**: Download all generated audiobook chapters
-
----
-
-## 🛠️ Technical Requirements
-
-- **Python 3.10+**
-- **8GB+ RAM** (16GB recommended for large projects)
-- **Modern web browser** for the interface
-- **CPU-only** - No GPU or CUDA required
-
----
-
-## ⚠️ Known Issues & Compatibility
-
-### **Multi-Voice Generation**
-- Short sentences or sections may occasionally cause issues during multi-voice generation
-- This is a limitation of the underlying TTS models rather than the implementation
-- **Workaround**: Use longer, more detailed sentences for better stability
-- Single-voice generation is not affected by this issue
-
-### **Voice Profile Compatibility**
-- **Existing Voices**: All older voice profiles remain fully functional
-- **New Features**: To benefit from improved audio quality, consider re-creating voice profiles
-- **Project Compatibility**: Existing audiobook projects work without modification
-- **Regeneration**: Individual chunks can be regenerated with improved quality settings
-
-### **Batch Processing Considerations**
-- Large batch jobs may take significant time depending on text length and hardware
-- Monitor system resources during extended batch processing sessions
-- Consider processing very large books in smaller batches for better control
-
----
-
-## 📋 Supported Formats
-
-### Input
-- **Text**: `.txt`, `.md`, formatted stories and scripts
-- **Audio Samples**: `.wav`, `.mp3`, `.flac` for voice cloning
-- **Batch Files**: Multiple text files for queue processing
-
-### Output
-- **Audio**: High-quality `.wav` files with professional volume levels
-- **Projects**: Organized folder structure with chapters
-- **Exports**: Ready-to-use audiobook files
-- **Batch Results**: Multiple completed audiobooks from queue processing
-
----
-
-## 🆘 Support
-
-- **Features Guide**: See `AUDIOBOOK_FEATURES.md` for detailed capabilities
-- **Development Notes**: Check `development/` folder for technical details
-- **Issues**: Report problems via GitHub issues
+**On-demand models (user idea):** removed `demo.load` model preload — UI opens model-free, `load_model(language_id)` lazy-loads multilingual-or-Bangla on first use; all 6 `from_pretrained` fallbacks routed through the singleton (fixes double-load race where a click during preload loaded weights twice).
 
 ---
 
 ## 📄 License
+Licensed under the terms in `LICENSE`. Underlying TTS: ResembleAI Chatterbox (multilingual V3).
 
-This project is licensed under the terms specified in `LICENSE`.
-
----
-
-**🎉 Ready to create amazing audiobooks with professional volume levels and enhanced audio quality? Run `./launch_audiobook.bat` and start generating!** 
+**Ready? `./install-audiobook.sh` once, `./launch_audiobook.sh` forever (or Mint menu → Chatterbox).** 🎉

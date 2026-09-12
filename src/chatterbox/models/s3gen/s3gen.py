@@ -111,6 +111,7 @@ class S3Token2Mel(torch.nn.Module):
         params = self.tokenizer.parameters()
         return next(params).device
 
+    @torch.inference_mode()
     def embed_ref(
         self,
         ref_wav: torch.Tensor,
@@ -296,8 +297,17 @@ class S3Token2Wav(S3Token2Mel):
         cache_source: torch.Tensor = None, # NOTE: this arg is for streaming, it can probably be removed here
         finalize: bool = True,
     ):
+        import time as _st
+        _s0 = _st.time()
+        _n_tok = int(speech_tokens.shape[-1]) if hasattr(speech_tokens, 'shape') else 0
+        print(f"🎻 [S3Gen] Flow matching start: {_n_tok} tokens...", flush=True)
         output_mels = self.flow_inference(speech_tokens, ref_wav=ref_wav, ref_sr=ref_sr, ref_dict=ref_dict, finalize=finalize)
+        print(f"🎻 [S3Gen] Flow done in {_st.time()-_s0:.1f}s -> mel frames {tuple(output_mels.shape)}", flush=True)
+        _v0 = _st.time()
+        _frames = int(output_mels.shape[2]) if hasattr(output_mels, 'shape') and len(output_mels.shape) > 2 else 0
+        print(f"🔊 [S3Gen] Vocoder start: {_frames} mel frames...", flush=True)
         output_wavs, output_sources = self.hift_inference(output_mels, cache_source)
+        print(f"🔊 [S3Gen] Vocoder done in {_st.time()-_v0:.1f}s -> {output_wavs.shape[-1]/S3GEN_SR:.1f}s audio (total S3Gen {_st.time()-_s0:.1f}s)", flush=True)
 
         # NOTE: ad-hoc method to reduce "spillover" from the reference clip.
         output_wavs[:, :len(self.trim_fade)] *= self.trim_fade

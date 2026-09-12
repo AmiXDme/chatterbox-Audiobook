@@ -271,4 +271,8 @@ class VoiceEncoder(nn.Module):
 
         mels = [melspectrogram(w, self.hp).T for w in wavs]
 
-        return self.embeds_from_mels(mels, as_spk=as_spk, batch_size=batch_size, **kwargs)
+        import time as _vt
+        _w0 = _vt.time()
+        out = self.embeds_from_mels(mels, as_spk=as_spk, batch_size=batch_size, **kwargs)
+        print(f"🎙️ [VE] Embedded {len(wavs)} wav(s) in {_vt.time()-_w0:.1f}s", flush=True)
+        return out

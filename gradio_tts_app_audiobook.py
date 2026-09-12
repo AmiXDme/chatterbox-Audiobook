@@ -1,6 +1,10 @@
+import time as _startup_time
+_APP_T0 = _startup_time.time()
 import random
 import numpy as np
+print("[STARTUP] Importing torch (slow first time, terminal quiet)...", flush=True)
 import torch
+print("[STARTUP] Importing gradio...", flush=True)
 import gradio as gr
 import json
 import os
@@ -11,6 +15,10 @@ from pathlib import Path
 import torchaudio
 import tempfile
 import time
+import math
+import html
+import threading
+from datetime import datetime, timedelta
 from typing import List
 import warnings
 warnings.filterwarnings("ignore")
@@ -19,7 +27,6 @@ warnings.filterwarnings("ignore")
 import sys
 from contextlib import redirect_stdout, redirect_stderr
 from io import StringIO
-import os
 
 # Set environment variable to force tqdm to use single line updates
 os.environ['TQDM_DISABLE'] = '0'
@@ -70,9 +77,11 @@ except ImportError:
     SOUNDFILE_AVAILABLE = False
 
 # Try importing the TTS module
+print("[STARTUP] Importing Chatterbox stack (T3/S3Gen/tokenizer, terminal quiet)...", flush=True)
 try:
     from src.chatterbox.mtl_tts import ChatterboxMultilingualTTS as ChatterboxTTS, SUPPORTED_LANGUAGES
     CHATTERBOX_AVAILABLE = True
+    print("[STARTUP] Chatterbox stack ready.", flush=True)
 except ImportError as e:
     print(f"Warning: ChatterboxMultilingualTTS not available - {e}")
     CHATTERBOX_AVAILABLE = False
@@ -84,6 +93,102 @@ try:
 except ImportError as e:
     print(f"Warning: ChatterboxVC not available - {e}")
     CHATTERBOX_VC_AVAILABLE = False
+
+# Try importing the Bangla (Bengali) model module
+try:
+    from src.audiobook.bangla import resolve_model_for_language as _bangla_resolve
+    from src.audiobook.bangla import is_bangla as _is_bangla
+    from src.audiobook.bangla import evict_bangla_model as _evict_bangla
+    BANGLA_AVAILABLE = True
+except ImportError as e:
+    print(f"Warning: BanglaTTS not available - {e}")
+    BANGLA_AVAILABLE = False
+    _bangla_resolve = None
+    _is_bangla = None
+    _evict_bangla = None
+
+def _evict_model(cache_dict, tag) -> bool:
+    """Drop a cached model to free RAM. Returns True if anything was freed."""
+    try:
+        if cache_dict.get("model") is not None:
+            cache_dict["model"] = None
+            import gc as _gc
+            _gc.collect()
+            try:
+                import ctypes as _ct
+                _ct.CDLL("libc.so.6").malloc_trim(0)
+            except Exception:
+                pass
+            print(f"[MEM] Evicted {tag} model from RAM", flush=True)
+            return True
+    except Exception as e:
+        print(f"[MEM] Evict {tag} failed: {e}", flush=True)
+    return False
+
+def _sync_model_state(m):
+    """Point the UI's model_state at the active model so stale weights are released."""
+    try:
+        st = globals().get("model_state")
+        if st is not None:
+            st.value = m
+    except Exception:
+        pass
+
+def _resolve_model_for_language(model, language_id):
+    """Strict one-model-at-a-time routing.
+
+    bn -> Bangla (multilingual evicted); anything else -> given model
+    (Bangla evicted). The UI state is synced so no stale weights linger.
+    """
+    want_bn = bool(BANGLA_AVAILABLE and _is_bangla is not None and _is_bangla(language_id))
+    if want_bn:
+        _evict_model(_TTS_MODEL_CACHE, "multilingual")
+        m = _bangla_resolve(model, language_id) if _bangla_resolve else model
+        _sync_model_state(m)
+        return m
+    if _evict_bangla is not None:
+        _evict_bangla()
+    _sync_model_state(model)
+    return model
+
+# Default sample text per language (used when switching languages).
+# A textbox is only auto-filled when it is empty or still holds a previous
+# default — your own typed text is never overwritten.
+DEFAULT_TEXTS = {
+    "en": "Hello! This is a test of the text to speech system. How does my voice sound?",
+    "bn": "আমি বাংলায় কথা বলতে পারি। এটি একটি পরীক্ষামূলক বাক্য।",
+    "ar": "مرحباً! هذا اختبار لنظام تحويل النص إلى كلام. كيف يبدو صوتي؟",
+    "da": "Hej! Dette er en test af tekst-til-tale-systemet. Hvordan lyder min stemme?",
+    "de": "Hallo! Dies ist ein Test des Text-to-Speech-Systems. Wie klingt meine Stimme?",
+    "el": "Γεια σας! Αυτή είναι μια δοκιμή του συστήματος μετατροπής κειμένου σε ομιλία. Πώς ακούγεται η φωνή μου;",
+    "es": "¡Hola! Esta es una prueba del sistema de texto a voz. ¿Cómo suena mi voz?",
+    "fi": "Hei! Tämä on tekstistä puheeksi -järjestelmän testi. Miltä ääneni kuulostaa?",
+    "fr": "Bonjour ! Ceci est un test du système de synthèse vocale. Comment trouvez-vous ma voix ?",
+    "he": "שלום! זהו מבחן של מערכת הטקסט לדיבור. איך נשמע הקול שלי؟",
+    "hi": "नमस्ते! यह टेक्स्ट टू स्पीच सिस्टम का परीक्षण है। मेरी आवाज़ कैसी लग रही है?",
+    "it": "Ciao! Questo è un test del sistema di sintesi vocale. Come ti sembra la mia voce?",
+    "ja": "こんにちは！これは音声合成システムのテストです。私の声はどう聞こえますか？",
+    "ko": "안녕하세요! 이것은 음성 합성 시스템의 테스트입니다. 제 목소리가 어떻게 들리나요?",
+    "ms": "Helo! Ini adalah ujian sistem teks ke pertuturan. Bagaimanakah suara saya?",
+    "nl": "Hallo! Dit is een test van het tekst-naar-spraak-systeem. Hoe klinkt mijn stem?",
+    "no": "Hei! Dette er en test av tekst-til-tale-systemet. Hvordan høres stemmen min ut?",
+    "pl": "Cześć! To jest test systemu zamiany tekstu na mowę. Jak brzmi mój głos?",
+    "pt": "Olá! Este é um teste do sistema de texto para fala. Como soa a minha voz?",
+    "ru": "Привет! Это проверка системы преобразования текста в речь. Как звучит мой голос?",
+    "sv": "Hej! Detta är ett test av text-till-tal-systemet. Hur låter min röst?",
+    "sw": "Hujambo! Hiki ni kipimo cha mfumo wa maandishi-kwa-hotuba. Sauti yangu inasikikaje?",
+    "tr": "Merhaba! Bu, metinden konuşmaya sisteminin bir testidir. Sesim nasıl geliyor?",
+    "zh": "你好！这是文本转语音系统的测试。我的声音听起来怎么样？",
+}
+_DEFAULT_TEXT_SET = set(DEFAULT_TEXTS.values())
+
+def apply_default_text(lang, current):
+    """Return the sample text for lang, unless the user typed their own text."""
+    new = DEFAULT_TEXTS.get(lang, DEFAULT_TEXTS["en"])
+    cur = (current or "").strip()
+    if not cur or cur in _DEFAULT_TEXT_SET:
+        return new
+    return gr.update()
 
 DEVICE = "cpu"
 MULTI_VOICE_DEVICE = "cpu"
@@ -133,7 +238,10 @@ def _copy_ref_audio(audio_prompt_path):
         os.makedirs("_working_audio", exist_ok=True)
         dst = os.path.join("_working_audio", f"ref_{os.getpid()}.wav")
         import shutil
+        _cp0 = time.time()
+        _sz = os.path.getsize(src) / 1e6
         shutil.copyfile(src, dst)
+        print(f"[REF {time.strftime('%H:%M:%S')}] Copied {_sz:.1f}MB -> {dst} in {time.time()-_cp0:.2f}s", flush=True)
         return dst
     except Exception as e:
         print(f"⚠️ Could not copy reference audio, using original path: {e}")
@@ -144,27 +252,59 @@ def set_seed(seed: int):
     random.seed(seed)
     np.random.seed(seed)
 
-def load_model():
-    print("⏳ [TTS] Loading multilingual model (CPU)...")
-    model = ChatterboxTTS.from_pretrained(DEVICE)
-    print("✅ [TTS] Model loaded.")
-    return model
+_TTS_MODEL_CACHE = {"model": None}
+_TTS_MODEL_LOCK = threading.Lock()
+_VC_MODEL_CACHE = {"model": None}
+_VC_MODEL_LOCK = threading.Lock()
+
+
+def _reuse_or_load(cache, lock, tag, loader):
+    """Return cached model or load exactly once (double-checked locking).
+
+    Prevents duplicate multi-GB loads when demo.load re-fires per client,
+    which OOM-kills small machines.
+    """
+    if cache["model"] is not None:
+        print(f"♻️ [{tag}] Reusing already-loaded model.")
+        return cache["model"]
+    with lock:
+        if cache["model"] is not None:
+            print(f"♻️ [{tag}] Reusing already-loaded model.")
+            return cache["model"]
+        _l0 = time.time()
+        print(f"[{tag}] Cold load start | RAM {_rss_mb():.0f}MB", flush=True)
+        cache["model"] = loader()
+        print(f"[{tag}] Cold load done in {time.time()-_l0:.1f}s | RAM {_rss_mb():.0f}MB", flush=True)
+        return cache["model"]
+
+
+def load_model(language_id="en"):
+    # Bengali never touches the multilingual weights — route first so a
+    # bn-only user never downloads/loads the 23-language model at all.
+    routed = _resolve_model_for_language(None, language_id)
+    if routed is not None:
+        return routed
+    def _load():
+        print("⏳ [TTS] Loading multilingual model (CPU)...")
+        model = ChatterboxTTS.from_pretrained(DEVICE)
+        print("✅ [TTS] Model loaded.")
+        return model
+    return _reuse_or_load(_TTS_MODEL_CACHE, _TTS_MODEL_LOCK, "TTS", _load)
 
 def load_model_cpu():
-    """Load model specifically for CPU processing"""
-    print("⏳ [TTS] Loading multilingual model (CPU)...")
-    model = ChatterboxTTS.from_pretrained("cpu")
-    print("✅ [TTS] Model loaded (CPU).")
-    return model
+    """Load model specifically for CPU processing (shares the singleton cache)"""
+    return load_model()
 
 def load_vc_model():
-    """Load the Voice Conversion model"""
+    """Load the Voice Conversion model (lazy + singleton — never at startup)"""
     if not CHATTERBOX_VC_AVAILABLE:
         return None
-    print("⏳ [VC] Loading voice conversion model (CPU)...")
-    model = ChatterboxVC.from_pretrained("cpu")
-    print("✅ [VC] Voice conversion model loaded.")
-    return model
+    def _load():
+        print("⏳ [VC] Loading voice conversion model (CPU)...")
+        model = ChatterboxVC.from_pretrained("cpu")
+        print("✅ [VC] Voice conversion model loaded.")
+        return model
+    return _reuse_or_load(_VC_MODEL_CACHE, _VC_MODEL_LOCK, "VC", _load)
 
 def vc_convert(vc_model, source_audio, target_voice_path):
     """Convert source audio to sound like target voice"""
@@ -187,9 +327,454 @@ def vc_convert(vc_model, source_audio, target_voice_path):
         print(f"❌ [VC] Conversion failed: {e}")
         return None, f"❌ Conversion failed: {str(e)}"
 
-def generate(model, text, audio_prompt_path, exaggeration, temperature, seed_num, cfgw, min_p=0.05, top_p=1.0, repetition_penalty=1.2, language_id="en", progress=gr.Progress(track_tqdm=True)):
+# --- Chunked any-length voice conversion with realtime progress/timing/cancel ---
+VC_CANCEL_EVENT = threading.Event()
+VC_CHUNK_SECONDS = 30.0
+VC_CHUNK_RETRIES = 2
+VC_SRC_SR = 16000  # S3 tokenizer input rate
+VC_TOKEN_RATE = 25  # speech tokens per second (matches S3 tokenizer)
+
+# --- Realtime TTS audiobook generation (cancel / pause / heartbeat / ETA) ---
+TTS_CANCEL_EVENT = threading.Event()
+TTS_PAUSE_EVENT = threading.Event()
+TTS_LIVE = {"running": False, "stop": True, "t_start": 0.0, "chunk": 0,
+            "total": 0, "eta": 0.0, "ends_at": "—", "paused": False,
+            "label": "TTS", "job": 0, "beat": 0.0}
+TTS_HEARTBEAT_SECONDS = 5
+
+
+def _rss_mb():
+    """Current process RAM in MB (Linux /proc, fallback 0)."""
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) / 1024.0
+    except Exception:
+        pass
+    return 0.0
+
+
+_SESSION = {"audio_s": 0.0, "wall_s": 0.0, "jobs": 0}
+
+def _waveform_ascii(audio_np, width=64, height=8):
+    """Render mono audio as a small ASCII waveform block. Pure numpy, no deps."""
+    try:
+        a = np.asarray(audio_np).flatten()
+        if a.size == 0:
+            return "(empty audio)"
+        a = a / max(float(np.abs(a).max()), 1e-9)
+        idx = (np.linspace(0, a.size, width + 1)).astype(int)
+        peaks = [float(np.abs(a[idx[i]:idx[i + 1]]).max(initial=0.0)) for i in range(width)]
+        chars = " ▁▂▃▄▅▆▇█"
+        rows = []
+        for r in range(height, 0, -1):
+            rows.append("".join(chars[8] if p * height >= r - 0.5 else " " for p in peaks))
+        return "\n".join(rows)
+    except Exception as e:
+        return f"(waveform unavailable: {e})"
+
+def _session_add(label, audio_s, wall_s):
+    """Accumulate session production totals and print them."""
+    _SESSION["audio_s"] += max(0.0, audio_s)
+    _SESSION["wall_s"] += max(0.0, wall_s)
+    _SESSION["jobs"] += 1
+    a, w = _SESSION["audio_s"], _SESSION["wall_s"]
+    print("\a", end="", flush=True)  # terminal bell: long jobs announce completion
+    print(f"📊 [SESSION] {label}: +{audio_s:.1f}s audio in {wall_s:.1f}s | "
+          f"session total: {_SESSION['jobs']} job(s) → {a/60:.1f} min audio in {w/3600:.2f} h", flush=True)
+
+
+def logged_job(label):
+    """Decorator: realtime terminal framing for any background job.
+
+    Starts the shared heartbeat, logs start/finish with duration + RAM.
+    Works for plain functions and generators. Guarantees no job ever runs
+    silent in the terminal. Safe for Gradio handlers (functools.wraps kept).
+    """
+    import inspect as _inspect
+    from functools import wraps as _wraps
+
+    def _begin():
+        t0 = time.time()
+        TTS_LIVE.update({"running": True, "stop": False, "t_start": t0, "beat": t0,
+                         "chunk": 0, "total": 1, "eta": 0.0, "ends_at": "—",
+                         "paused": False, "label": label, "job": TTS_LIVE.get("job", 0) + 1})
+        threading.Thread(target=_tts_heartbeat, daemon=True).start()
+        print(f"[{label} {time.strftime('%H:%M:%S')}] Job started — RAM {_rss_mb():.0f}MB", flush=True)
+        return t0
+
+    def _end(t0):
+        TTS_LIVE["stop"] = True
+        TTS_LIVE["running"] = False
+        print(f"[{label} {time.strftime('%H:%M:%S')}] Job finished in {time.time()-t0:.1f}s | RAM {_rss_mb():.0f}MB", flush=True)
+
+    def deco(fn):
+        if _inspect.isgeneratorfunction(fn):
+            @_wraps(fn)
+            def gen_wrapper(*a, **k):
+                t0 = _begin()
+                try:
+                    yield from fn(*a, **k)
+                finally:
+                    _end(t0)
+            return gen_wrapper
+        else:
+            @_wraps(fn)
+            def plain_wrapper(*a, **k):
+                t0 = _begin()
+                try:
+                    return fn(*a, **k)
+                finally:
+                    _end(t0)
+            return plain_wrapper
+    return deco
+
+
+def _tts_heartbeat():
+    """Background thread: terminal tick every few seconds while a TTS job runs."""
+    my_job = TTS_LIVE.get("job", 0)
+    # NOTE: a single chunk can legitimately take >10 min on CPU, so the stale
+    # cutoff is generous (30 min) — it only catches truly orphaned threads.
+    while not TTS_LIVE["stop"] and TTS_LIVE.get("job", 0) == my_job:
+        time.sleep(TTS_HEARTBEAT_SECONDS)
+        if TTS_LIVE["running"] and not TTS_LIVE["stop"] and TTS_LIVE.get("job", 0) == my_job:
+            if time.time() - TTS_LIVE.get("beat", 0) > 1800:
+                # Main loop died without stopping us — exit instead of ticking forever
+                TTS_LIVE["running"] = False
+                TTS_LIVE["stop"] = True
+                print("[TTS] heartbeat stale — stopping.", flush=True)
+                return
+            elapsed = time.time() - TTS_LIVE["t_start"]
+            state = "⏸️ PAUSED" if TTS_LIVE["paused"] else "⏳ working"
+            # Slow-chunk watchdog: current chunk far beyond running average
+            # means slow (not stuck) — say so explicitly.
+            _warn = ""
+            _cs, _avg = TTS_LIVE.get("cstart", 0), TTS_LIVE.get("avg", 0)
+            if _cs and _avg and not TTS_LIVE.get("paused") and (time.time() - _cs) > max(180, 3 * _avg):
+                _warn = f" | ⚠️ chunk slow ({time.time()-_cs:.0f}s vs avg {_avg:.0f}s) — still working"
+            # Live token readout: T3 loop feeds T3_PROGRESS, so single-segment
+            # jobs (no completed chunks yet) still get tok/s + real ETA.
+            # NOTE: our package exists as TWO module trees (src.chatterbox.* via
+            # local imports, chatterbox.* via the editable pip install). A model
+            # may run from either tree, each with its own T3_PROGRESS dict —
+            # so consult both and use whichever is active.
+            _tokextra = ""
+            try:
+                _TP = None
+                for _mod in ("src.chatterbox.models.t3.t3", "chatterbox.models.t3.t3"):
+                    try:
+                        _m = sys.modules.get(_mod) or __import__(_mod, fromlist=["T3_PROGRESS"])
+                        _d = _m.T3_PROGRESS
+                        if _d.get("active"):
+                            _TP = _d
+                            break
+                        if _TP is None:
+                            _TP = _d
+                    except Exception:
+                        continue
+                if _TP is not None:
+                    _t3age = time.time() - _TP.get("t0", 0)
+                    if _TP.get("active") and _t3age < 900 and _TP.get("est", 0) > 0:
+                        _tok = _TP.get("tokens", 0)
+                        _rate = _tok / max(_t3age, 1e-3)
+                        _teta = max(0.0, (_TP["est"] - _tok) / max(_rate, 1e-3))
+                        _tends = (datetime.now() + timedelta(seconds=_teta)).strftime('%H:%M:%S')
+                        _tokextra = f" | tok {_tok}/{_TP['est']} ({_rate:.1f}/s) ETA {_teta:.0f}s ends ~{_tends}"
+            except Exception:
+                pass
+            print(f"[{TTS_LIVE['label']} {time.strftime('%H:%M:%S')}] {state}... "
+                  f"chunk {TTS_LIVE['chunk']}/{TTS_LIVE['total']} | "
+                  f"elapsed {elapsed:.0f}s | ETA {TTS_LIVE['eta']:.0f}s "
+                  f"(ends ~{TTS_LIVE['ends_at']}) | RAM {_rss_mb():.0f}MB{_tokextra}{_warn}", flush=True)
+
+
+def tts_request_cancel():
+    """Signal a running TTS job to stop after the current chunk finishes."""
+    TTS_CANCEL_EVENT.set()
+    print("[TTS] 🛑 Cancel requested by user.", flush=True)
+    return "<div class='audiobook-status'>🛑 Cancel requested — stopping after current chunk...</div>"
+
+
+def tts_toggle_pause():
+    """Toggle pause/resume for a running TTS job. Returns button label update."""
+    if TTS_PAUSE_EVENT.is_set():
+        TTS_PAUSE_EVENT.clear()
+        print("[TTS] ▶️ Resumed by user.", flush=True)
+        return gr.update(value="⏸️ Pause")
+    else:
+        TTS_PAUSE_EVENT.set()
+        print("[TTS] ⏸️ Paused by user.", flush=True)
+        return gr.update(value="▶️ Resume")
+
+
+def vc_request_cancel():
+    """Signal a running chunked VC job to stop after the current chunk finishes."""
+    VC_CANCEL_EVENT.set()
+    print("[VC] 🛑 Cancel requested by user.", flush=True)
+    return "<div class='voice-status'>🛑 Cancel requested — stopping after current chunk...</div>"
+
+
+def _vc_save_wav(filepath, audio_np, sample_rate):
+    """Save a mono numpy array as 16-bit WAV (soundfile preferred, wave fallback)."""
+    audio_np = np.asarray(audio_np).flatten()
+    if SOUNDFILE_AVAILABLE:
+        sf.write(filepath, audio_np, sample_rate)
+    else:
+        audio_int16 = (np.clip(audio_np, -1.0, 1.0) * 32767).astype(np.int16)
+        with wave.open(filepath, 'wb') as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(sample_rate)
+            wf.writeframes(audio_int16.tobytes())
+
+
+def _vc_apply_edge_fades(chunk, sample_rate, fade_ms=10):
+    """Tiny fade in/out at chunk edges to avoid clicks when stitching."""
+    n = min(int(sample_rate * fade_ms / 1000), len(chunk) // 2)
+    if n > 0:
+        chunk = chunk.copy()
+        ramp = np.linspace(0.0, 1.0, n)
+        chunk[:n] *= ramp
+        chunk[-n:] *= ramp[::-1]
+    return chunk
+
+
+# Shared live state for realtime VC updates (read by heartbeat thread + UI yields)
+VC_LIVE = {"running": False, "stop": True, "t_start": 0.0, "chunk": 0,
+           "total": 0, "eta": 0.0, "ends_at": "—", "job": 0, "beat": 0.0}
+VC_HEARTBEAT_SECONDS = 5
+
+
+def _vc_heartbeat():
+    """Background thread: terminal tick every few seconds while a VC job runs."""
+    my_job = VC_LIVE.get("job", 0)
+    while not VC_LIVE["stop"] and VC_LIVE.get("job", 0) == my_job:
+        time.sleep(VC_HEARTBEAT_SECONDS)
+        if VC_LIVE["running"] and not VC_LIVE["stop"] and VC_LIVE.get("job", 0) == my_job:
+            if time.time() - VC_LIVE.get("beat", 0) > 1800:
+                VC_LIVE["running"] = False
+                VC_LIVE["stop"] = True
+                print("[VC] heartbeat stale — stopping.", flush=True)
+                return
+            elapsed = time.time() - VC_LIVE["t_start"]
+            _warn = ""
+            _cs, _avg = VC_LIVE.get("cstart", 0), VC_LIVE.get("avg", 0)
+            if _cs and _avg and (time.time() - _cs) > max(180, 3 * _avg):
+                _warn = f" | ⚠️ chunk slow ({time.time()-_cs:.0f}s vs avg {_avg:.0f}s) — still working"
+            print(f"[VC {time.strftime('%H:%M:%S')}] ⏳ working... "
+                  f"chunk {VC_LIVE['chunk']}/{VC_LIVE['total']} | "
+                  f"elapsed {elapsed:.0f}s | ETA {VC_LIVE['eta']:.0f}s "
+                  f"(ends ~{VC_LIVE['ends_at']}) | RAM {_rss_mb():.0f}MB{_warn}", flush=True)
+
+
+def vc_convert_chunked(vc_model, source_audio, target_voice_path, chunk_seconds=VC_CHUNK_SECONDS, progress=None):
+    """Convert any-length source audio in chunks with realtime progress, timing, retry + cancel.
+
+    Generator — yields (audio, status_html, timing_html, chunk_files, original_echo)
+    after every chunk so the UI updates live, plus a terminal heartbeat every few seconds.
+    """
+    import librosa
+
+    t_start = time.time()
+    start_stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    VC_CANCEL_EVENT.clear()
+
+    def tlog(msg):
+        print(f"[VC {time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
+    def live_timing():
+        elapsed = time.time() - t_start
+        return (f"<div class='voice-status'>⏳ Converting... chunk {VC_LIVE['chunk']}/{VC_LIVE['total']} • "
+                f"elapsed <b>{elapsed:.0f}s</b> • ETA <b>{VC_LIVE['eta']:.0f}s</b> • "
+                f"ends ~<b>{VC_LIVE['ends_at']}</b></div>")
+
+    empty_timing = "<div class='voice-status'>⏱️ Timing info will appear here...</div>"
+    tlog(f"Job started at {start_stamp}")
+
+    if vc_model is None:
+        tlog("No model loaded, loading VC model now...")
+        if not CHATTERBOX_VC_AVAILABLE:
+            yield None, "❌ VC model not available", empty_timing, [], source_audio
+            return
+        vc_model = ChatterboxVC.from_pretrained("cpu")
+    if vc_model is None:
+        yield None, "❌ VC model not available", empty_timing, [], source_audio
+        return
+    if source_audio is None:
+        yield None, "❌ Please upload or record source audio", empty_timing, [], None
+        return
+    if target_voice_path is None:
+        yield None, "❌ Please select or upload a target voice reference", empty_timing, [], source_audio
+        return
+
+    # Load full source at 16kHz and split into chunks
+    tlog("Loading source audio...")
+    src, _ = librosa.load(source_audio, sr=VC_SRC_SR)
+    total_dur = len(src) / VC_SRC_SR
+    total_chunks = max(1, math.ceil(total_dur / chunk_seconds))
+    tlog(f"Source: {total_dur:.1f}s → {total_chunks} chunk(s) of up to {chunk_seconds:.0f}s")
+
+    base = os.path.splitext(os.path.basename(str(source_audio)))[0]
+    safe = "".join(c for c in base if c.isalnum() or c in ('-', '_'))[:40] or "vc_source"
+    out_dir = os.path.join("vc_output", f"{safe}_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+    os.makedirs(out_dir, exist_ok=True)
+    tlog(f"Output folder: {out_dir}")
+
+    # Embed target voice once (first 10s used by the model)
+    tlog("Embedding target voice...")
+    vc_model.set_target_voice(target_voice_path)
+    tlog("Target voice ready.")
+
+    sr_out = getattr(vc_model, "sr", 24000)
+    chunk_files = []
+    converted_parts = []
+    total_tokens = 0
+    failed_chunks = []
+    done_chunks = 0
+    cancelled = False
+    last_ends_at = "—"
+
+    # Start realtime terminal heartbeat
+    VC_LIVE.update({"running": True, "stop": False, "t_start": t_start, "beat": t_start,
+                    "chunk": 0, "total": total_chunks, "eta": 0.0, "ends_at": "—",
+                    "job": VC_LIVE.get("job", 0) + 1})
+    threading.Thread(target=_vc_heartbeat, daemon=True).start()
+
+    try:
+        for idx in range(total_chunks):
+            if VC_CANCEL_EVENT.is_set():
+                cancelled = True
+                tlog(f"Cancelled by user after {done_chunks}/{total_chunks} chunks.")
+                break
+
+            VC_LIVE["chunk"] = idx + 1
+            VC_LIVE["beat"] = time.time()
+            c_start = time.time()
+            VC_LIVE["cstart"] = c_start
+            s0 = int(idx * chunk_seconds * VC_SRC_SR)
+            s1 = min(len(src), int((idx + 1) * chunk_seconds * VC_SRC_SR))
+            chunk = src[s0:s1]
+            chunk_dur = len(chunk) / VC_SRC_SR
+            est_tokens = int(chunk_dur * VC_TOKEN_RATE)
+
+            tlog(f"Chunk {idx + 1}/{total_chunks}: {chunk_dur:.1f}s (~{est_tokens} tokens)...")
+            if progress is not None:
+                try:
+                    progress(idx / total_chunks, desc=f"Chunk {idx + 1}/{total_chunks} converting...")
+                except Exception:
+                    pass
+
+            tmp_path = os.path.join(out_dir, f"_tmp_chunk_{idx + 1:03d}.wav")
+            _vc_save_wav(tmp_path, chunk, VC_SRC_SR)
+
+            out = None
+            for attempt in range(VC_CHUNK_RETRIES + 1):
+                try:
+                    out = vc_model.generate(tmp_path)
+                    break
+                except Exception as e:
+                    tlog(f"  Chunk {idx + 1} attempt {attempt + 1}/{VC_CHUNK_RETRIES + 1} failed: {e}")
+                    if attempt == VC_CHUNK_RETRIES:
+                        failed_chunks.append(idx + 1)
+
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+            if out is None:
+                tlog(f"  Chunk {idx + 1} FAILED after retries — skipped.")
+                partial = np.concatenate(converted_parts) if converted_parts else None
+                yield ((sr_out, partial) if partial is not None else None,
+                       f"⚠️ Chunk {idx + 1} failed — continuing...",
+                       live_timing(), list(chunk_files), source_audio)
+                continue
+
+            out_np = _vc_apply_edge_fades(np.asarray(out.squeeze()), sr_out)
+            chunk_path = os.path.join(out_dir, f"{safe}_chunk_{idx + 1:03d}.wav")
+            _vc_save_wav(chunk_path, out_np, sr_out)
+            chunk_files.append(chunk_path)
+            converted_parts.append(out_np)
+            done_chunks += 1
+            total_tokens += est_tokens
+
+            c_elapsed = time.time() - c_start
+            elapsed = time.time() - t_start
+            avg = elapsed / done_chunks
+            eta = avg * (total_chunks - idx - 1)
+            ends_at = (datetime.now() + timedelta(seconds=max(0, eta))).strftime('%H:%M:%S')
+            last_ends_at = ends_at
+            VC_LIVE["eta"] = eta
+            VC_LIVE["ends_at"] = ends_at
+            VC_LIVE["beat"] = time.time()
+            VC_LIVE["avg"] = avg
+            tlog(f"  Chunk {idx + 1} done in {c_elapsed:.1f}s | elapsed {elapsed:.0f}s | ETA {eta:.0f}s (ends ~{ends_at}) | tokens so far ~{total_tokens} | {len(out_np)/sr_out:.1f}s audio ({(len(out_np)/sr_out)/c_elapsed if c_elapsed > 0 else 0:.2f}× realtime)")
+
+            if progress is not None:
+                try:
+                    progress((idx + 1) / total_chunks,
+                             desc=f"Chunk {idx + 1}/{total_chunks} done • ETA {eta:.0f}s • ends ~{ends_at}")
+                except Exception:
+                    pass
+
+            # Realtime UI yield: partial stitched audio + live status/timing/files
+            partial_np = np.concatenate(converted_parts)
+            yield ((sr_out, partial_np),
+                   f"⏳ Converting... {done_chunks}/{total_chunks} chunks • elapsed {elapsed:.0f}s • ETA {eta:.0f}s • ends ~{ends_at}",
+                   live_timing(), list(chunk_files), source_audio)
+
+        total_elapsed = time.time() - t_start
+        end_stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        if not converted_parts:
+            tlog("No chunks converted — nothing to stitch.")
+            timing = (f"<div class='voice-status'>⏱️ Started {start_stamp} • ended {end_stamp} • "
+                      f"elapsed {total_elapsed:.1f}s • 0/{total_chunks} chunks converted</div>")
+            yield None, "❌ Conversion failed — no chunks produced output.", timing, [], source_audio
+            return
+
+        # Stitch all converted parts into one file
+        final_np = np.concatenate(converted_parts)
+        final_path = os.path.join(out_dir, f"{safe}_converted_full.wav")
+        _vc_save_wav(final_path, final_np, sr_out)
+        final_dur = len(final_np) / sr_out
+
+        if cancelled:
+            status = (f"🛑 Cancelled by user — partial result: {done_chunks}/{total_chunks} chunks "
+                      f"({final_dur:.1f}s) stitched.")
+        elif failed_chunks:
+            status = (f"⚠️ Done with errors — {done_chunks}/{total_chunks} chunks converted "
+                      f"({final_dur:.1f}s). Failed chunks skipped: {failed_chunks}")
+        else:
+            status = f"✅ Voice conversion complete! {done_chunks}/{total_chunks} chunks ({final_dur:.1f}s)"
+        tlog(f"FINISHED at {end_stamp} | total {total_elapsed:.1f}s | ~{total_tokens} tokens | output: {final_path}")
+
+        timing = (f"<div class='voice-status'>⏱️ Started <b>{start_stamp}</b> • ended <b>{end_stamp}</b> • "
+                  f"total <b>{total_elapsed:.1f}s</b> • avg <b>{total_elapsed / max(done_chunks, 1):.1f}s/chunk</b> • "
+                  f"~{total_tokens} tokens")
+        if cancelled or failed_chunks:
+            timing += f" • last projected end <b>{last_ends_at}</b>"
+        timing += "</div>"
+        yield (sr_out, final_np), status, timing, chunk_files, source_audio
+        print(f"[WAVEFORM] {final_dur:.1f}s:\n{_waveform_ascii(final_np)}", flush=True)
+        _session_add("VC", final_dur, total_elapsed)
+    finally:
+        VC_LIVE["stop"] = True
+        VC_LIVE["running"] = False
+
+def generate(model, text, audio_prompt_path, exaggeration, temperature, seed_num, cfgw, min_p=0.05, top_p=1.0, repetition_penalty=1.2,     language_id="en", progress=gr.Progress(track_tqdm=True)):
     if model is None:
-        model = ChatterboxTTS.from_pretrained(DEVICE)
+        model = load_model(language_id)  # singleton: dedupes concurrent loads, never double-loads
+
+    if not text or not text.strip():
+        raise gr.Error("❌ Please enter some text to convert to speech")
+
+    if audio_prompt_path is None:
+        raise gr.Error("❌ Please select a voice from the dropdown or upload a reference voice audio first")
+
+    # Bengali routes to the Bangla fine-tune singleton (rest stays multilingual)
+    model = _resolve_model_for_language(model, language_id)
 
     if seed_num != 0:
         set_seed(int(seed_num))
@@ -203,15 +788,29 @@ def generate(model, text, audio_prompt_path, exaggeration, temperature, seed_num
     audio_segments = []
     sample_rate = getattr(model, "sr", 24000) if model else 24000
     total_pauses_added = 0
+    q_start = time.time()
+    TTS_LIVE.update({"running": True, "stop": False, "t_start": q_start, "beat": q_start,
+                     "chunk": 0, "total": len(segments), "eta": 0.0, "ends_at": "—",
+                     "paused": False, "label": "TTS QUICK", "job": TTS_LIVE.get("job", 0) + 1})
+    threading.Thread(target=_tts_heartbeat, daemon=True).start()
+    print(f"[TTS QUICK {time.strftime('%H:%M:%S')}] Job started — {len(segments)} segment(s), RAM {_rss_mb():.0f}MB", flush=True)
+    seg_times = []
+    def _qstop():
+        TTS_LIVE["stop"] = True
+        TTS_LIVE["running"] = False
     
     # Prepare conditionals from audio prompt
     audio_prompt_path = _copy_ref_audio(audio_prompt_path)
-    progress(0.05, desc="Preparing voice conditioning...")
+    if progress is not None:
+        try:
+            progress(0.05, desc="Preparing voice conditioning...")
+        except Exception:
+            pass  # detached default Progress (e.g. Test Voice path) — non-fatal
     print(f"🎙️ [TTS] Preparing voice conditioning from reference audio (language={language_id})...")
     conds = model.prepare_conditionals(audio_prompt_path, exaggeration)
     print("✅ [TTS] Voice conditioning ready.")
     
-    for segment in segments:
+    for seg_i, segment in enumerate(segments):
         if not segment:
             continue
             
@@ -231,6 +830,20 @@ def generate(model, text, audio_prompt_path, exaggeration, temperature, seed_num
                 print(f"🎵 [TTS] Generating audio for: \"{text_segment[:60]}...\"" if len(text_segment) > 60 else f"🎵 [TTS] Generating audio for: \"{text_segment}\"")
                 import time as _time
                 _t0 = _time.time()
+                # Seed the live token estimate (~1.3 speech tokens/char observed)
+                # so the heartbeat can show tok/s + ETA during the AR loop.
+                # Written to BOTH module trees (see heartbeat note above).
+                try:
+                    _est = max(80, int(len(text_segment) * 1.35))
+                    for _mod in ("src.chatterbox.models.t3.t3", "chatterbox.models.t3.t3"):
+                        try:
+                            _m = sys.modules.get(_mod) or __import__(_mod, fromlist=["T3_PROGRESS"])
+                            _m.T3_PROGRESS.update({"est": _est, "tokens": 0, "active": False})
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+                TTS_LIVE.update({"chunk": seg_i + 1, "beat": _t0, "cstart": _t0})
                 wav = model.generate(
                     text_segment,
                     conds,
@@ -245,12 +858,34 @@ def generate(model, text, audio_prompt_path, exaggeration, temperature, seed_num
                 print(f"✅ [TTS] Segment done in {_time.time()-_t0:.1f}s")
                 audio_np = wav.squeeze(0).numpy()
                 audio_segments.append(audio_np)
+                seg_dur = _time.time() - _t0
+                seg_times.append(seg_dur)
+                seg_audio = len(audio_np) / sample_rate
+                rtf = seg_audio / seg_dur if seg_dur > 0 else 0
+                done_n = len(seg_times)
+                avg = sum(seg_times) / done_n
+                eta = avg * (len([s for s in segments if s.strip()]) - done_n)
+                ends_at = (datetime.now() + timedelta(seconds=max(0, eta))).strftime('%H:%M:%S')
+                TTS_LIVE.update({"chunk": seg_i + 1, "beat": _time.time(), "eta": eta, "ends_at": ends_at, "avg": avg})
+                print(f"[TTS QUICK {time.strftime('%H:%M:%S')}] seg {done_n}: {seg_audio:.1f}s audio in {seg_dur:.1f}s ({rtf:.2f}× realtime) | ETA {eta:.0f}s (ends ~{ends_at}) | RAM {_rss_mb():.0f}MB", flush=True)
+                if progress is not None:
+                    try:
+                        progress((seg_i + 1) / max(len(segments), 1),
+                                 desc=f"Segment {done_n} done • {seg_audio:.1f}s audio • ETA {eta:.0f}s • ends ~{ends_at}")
+                    except Exception:
+                        pass
     
     # Combine all audio segments
     if audio_segments:
         final_audio = np.concatenate(audio_segments)
         if total_pauses_added > 0:
             print(f"🔇 Total pause time distributed: {total_pauses_added:.1f}s")
+        _qstop()
+        _qa = len(final_audio) / sample_rate if sample_rate else 0
+        _qw = time.time() - q_start
+        print(f"[TTS QUICK {time.strftime('%H:%M:%S')}] Job done: {_qa:.1f}s audio in {_qw:.1f}s ({_qa/_qw if _qw > 0 else 0:.2f}× realtime) | RAM {_rss_mb():.0f}MB", flush=True)
+        print(f"[WAVEFORM] {_qa:.1f}s:\n{_waveform_ascii(final_audio)}", flush=True)
+        _session_add("TTS QUICK", _qa, _qw)
         return (sample_rate, final_audio)
     else:
         # Fallback to original behavior if no segments
@@ -265,6 +900,7 @@ def generate(model, text, audio_prompt_path, exaggeration, temperature, seed_num
             top_p=top_p,
             repetition_penalty=repetition_penalty,
         )
+        _qstop()
         return (sample_rate, wav.squeeze(0).numpy())
 
 def generate_with_cpu_fallback(model, text, audio_prompt_path, exaggeration, temperature, cfg_weight, min_p=0.05, top_p=1.0, repetition_penalty=1.2, language_id="en"):
@@ -663,12 +1299,19 @@ def validate_text_for_generation(text, voice_name=""):
 def generate_with_retry(model, text, audio_prompt_path, exaggeration, temperature, cfg_weight, max_retries=3, min_p=0.05, top_p=1.0, repetition_penalty=1.2, language_id="en"):
     """Generate audio with retry logic and text validation"""
     import signal
+    import threading
     import numpy as np
+
+    # SIGALRM only works on the main thread. Gradio runs handlers in worker
+    # threads, where signal.signal() raises ValueError — so arm the timeout
+    # only when we are actually on the main thread; otherwise run unguarded
+    # (the retry loop below still applies).
+    _USE_ALARM = hasattr(signal, 'SIGALRM') and threading.current_thread() is threading.main_thread()
     
     # Check if model is None and load it if needed
     if model is None:
         print("⚠️ Model is None, loading model...")
-        model = load_model()
+        model = load_model(language_id)
         if model is None:
             raise RuntimeError("❌ Failed to load TTS model")
     
@@ -695,8 +1338,8 @@ def generate_with_retry(model, text, audio_prompt_path, exaggeration, temperatur
     
     for retry in range(max_retries):
         try:
-            # Set timeout signal (only on Unix-like systems)
-            if hasattr(signal, 'SIGALRM'):
+            # Set timeout signal (main thread on Unix-like systems only)
+            if _USE_ALARM:
                 signal.signal(signal.SIGALRM, timeout_handler)
                 signal.alarm(timeout_seconds)
             
@@ -717,14 +1360,14 @@ def generate_with_retry(model, text, audio_prompt_path, exaggeration, temperatur
                 )
                 
                 # Cancel timeout if successful
-                if hasattr(signal, 'SIGALRM'):
+                if _USE_ALARM:
                     signal.alarm(0)
                 
                 return wav
             
             except TimeoutError:
                 print(f"⚠️ Generation timed out after {timeout_seconds}s, retry {retry + 1}/{max_retries}")
-                if hasattr(signal, 'SIGALRM'):
+                if _USE_ALARM:
                     signal.alarm(0)
                 if retry < max_retries - 1:
                     continue
@@ -745,6 +1388,7 @@ def generate_with_retry(model, text, audio_prompt_path, exaggeration, temperatur
     
     raise RuntimeError("Generation failed after all retries")
 
+@logged_job("TTS LEGACY")
 def create_audiobook(
     model,
     text_content: str,
@@ -824,7 +1468,9 @@ def create_audiobook(
 
     # Initialize model if needed
     if model is None:
-        model = ChatterboxTTS.from_pretrained(DEVICE)
+        model = load_model(language_id)  # singleton: dedupes concurrent loads, never double-loads
+    # Bengali routes to the Bangla fine-tune singleton (rest stays multilingual)
+    model = _resolve_model_for_language(model, language_id)
 
     audio_chunks: List[np.ndarray] = []
     status_updates = []
@@ -902,7 +1548,7 @@ def create_audiobook(
             import traceback
             traceback.print_exc()
             error_message = f"❌ Error generating chunk {i+1}: {chunk_error}"
-            return None, error_message, None, None
+            return None, error_message
         # Autosave every N chunks
         if (i + 1) % autosave_interval == 0 or (i + 1) == total_chunks:
             # Save project metadata
@@ -1004,8 +1650,11 @@ def save_voice_profile(voice_library_path, voice_name, display_name, description
         if enable_normalization:
             try:
                 # Load and analyze original audio
+                print(f"[VOICE SAVE {time.strftime('%H:%M:%S')}] Loading+analyzing '{os.path.basename(audio_file)}' ({os.path.getsize(audio_file)/1e6:.1f}MB)...", flush=True)
+                _vs0 = time.time()
                 audio_data, sample_rate = librosa.load(audio_file, sr=24000)
                 original_level_info = analyze_audio_level(audio_data, sample_rate)
+                print(f"[VOICE SAVE {time.strftime('%H:%M:%S')}] {len(audio_data)/sample_rate:.1f}s, rms {original_level_info['rms_db']:.1f}dB -> target {target_level_db:.1f}dB in {time.time()-_vs0:.1f}s", flush=True)
                 
                 # Normalize audio
                 normalized_audio = normalize_audio_to_target(
@@ -1104,18 +1753,22 @@ def load_voice_profile(voice_library_path, voice_name):
 
 def delete_voice_profile(voice_library_path, voice_name):
     """Delete a voice profile"""
+    def _dropdown_update():
+        profiles = get_voice_profiles(voice_library_path)
+        choices = [p['name'] for p in profiles]
+        return gr.Dropdown(choices=choices, value=choices[0] if choices else None)
     if not voice_name:
-        return "❌ No voice selected", []
+        return "❌ No voice selected", _dropdown_update()
     
     profile_dir = os.path.join(voice_library_path, voice_name)
     if os.path.exists(profile_dir):
         try:
             shutil.rmtree(profile_dir)
-            return f"✅ Voice profile '{voice_name}' deleted successfully!", get_voice_profiles(voice_library_path)
+            return f"✅ Voice profile '{voice_name}' deleted successfully!", _dropdown_update()
         except Exception as e:
-            return f"❌ Error deleting voice profile: {str(e)}", get_voice_profiles(voice_library_path)
+            return f"❌ Error deleting voice profile: {str(e)}", _dropdown_update()
     else:
-        return f"❌ Voice profile '{voice_name}' not found", get_voice_profiles(voice_library_path)
+        return f"❌ Voice profile '{voice_name}' not found", _dropdown_update()
 
 def refresh_voice_list(voice_library_path):
     """Refresh the voice profile list"""
@@ -1389,7 +2042,7 @@ def create_multi_voice_audiobook(model, text_content, voice_library_path, projec
         
         # Initialize model if needed
         if model is None:
-            model = ChatterboxTTS.from_pretrained(DEVICE)
+            model = load_model(language_id)  # singleton: dedupes concurrent loads, never double-loads
         
         audio_chunks = []
         chunk_info = []  # For saving metadata
@@ -1683,6 +2336,7 @@ def create_multi_voice_audiobook_with_assignments(
         autosave_interval: Chunks per autosave (default 10)
     Returns:
         (sample_rate, combined_audio), status_message
+    NOTE: generator — yields (audio, status, timing, chunk_text, pause_btn) live per chunk.
     """
     import numpy as np
     import os
@@ -1690,9 +2344,15 @@ def create_multi_voice_audiobook_with_assignments(
     import wave
     from typing import List
 
+    def _m5(audio, status):
+        return (audio, status,
+                "<div class='audiobook-status'>⏱️ Timing info will appear here...</div>",
+                "", gr.update(value="⏸️ Pause"))
+
     if not text_content or not project_name or not voice_assignments:
         error_msg = "❌ Missing required fields or voice assignments. Ensure text is entered, project name is set, and voices are assigned after analyzing text."
-        return None, None, error_msg, None
+        yield _m5(None, error_msg)
+        return
 
     # Import pause processing functions
     from src.audiobook.processing import chunk_multi_voice_text_with_line_break_priority, create_silence_audio
@@ -1722,14 +2382,16 @@ def create_multi_voice_audiobook_with_assignments(
                 'pause_duration': segment_data['pause_duration']
             })
         else:
-            return None, None, f"❌ No voice assignment found for character '{character_name}'", None
+            yield _m5(None, f"❌ No voice assignment found for character '{character_name}'")
+            return
 
     # Convert to the format expected by the rest of the function
     chunks = [(segment['voice'], segment['text']) for segment in mapped_segments_with_pauses]
     chunks = _filter_problematic_short_chunks(chunks, voice_assignments)
     total_chunks = len(chunks)
     if not chunks:
-        return None, None, "❌ No text chunks to process", None
+        yield _m5(None, "❌ No text chunks to process")
+        return
 
     # Project directory
     safe_project_name = "".join(c for c in project_name if c.isalnum() or c in (' ', '-', '_')).rstrip().replace(' ', '_')
@@ -1765,14 +2427,19 @@ def create_multi_voice_audiobook_with_assignments(
                 start_idx = i
                 break
         else:
-            return None, None, "✅ All chunks already completed. Nothing to resume.", None
+            yield _m5(None, "✅ All chunks already completed. Nothing to resume.")
+            return
     else:
         start_idx = 0
 
     # Initialize model if needed
     processing_model = model
     if processing_model is None:
-        processing_model = ChatterboxTTS.from_pretrained(DEVICE)
+        processing_model = load_model(language_id)  # singleton: dedupes concurrent loads, never double-loads
+    # Bengali routes to the Bangla fine-tune singleton (rest stays multilingual)
+    processing_model = _resolve_model_for_language(processing_model, language_id)
+    if processing_model is None:
+        processing_model = load_model(language_id)
 
     audio_chunks: List[np.ndarray] = []
     # For resume, load already completed audio
@@ -1783,14 +2450,82 @@ def create_multi_voice_audiobook_with_assignments(
             audio_data = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32767.0
             audio_chunks.append(audio_data)
 
+    # Realtime run state: timing, heartbeat, cancel/pause
+    t_start = time.time()
+    start_stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    TTS_CANCEL_EVENT.clear()
+    TTS_PAUSE_EVENT.clear()
+    sr_live = getattr(processing_model, "sr", 24000) if processing_model else 24000
+    failed_list = []
+    cancelled = False
+    done_new = 0
+    last_ends_at = "—"
+    # Voice-conditioning cache: same voices repeat across hundreds of chunks —
+    # embedding once per (audio_file, exaggeration) saves minutes per book.
+    conds_cache = {}
+    conds_hits = 0
+    conds_miss = 0
+
+    def tlog(msg):
+        print(f"[TTS MULTI {time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
+    def live_timing():
+        elapsed = time.time() - t_start
+        return (f"<div class='audiobook-status'>⏳ Generating... chunk {TTS_LIVE['chunk']}/{TTS_LIVE['total']} • "
+                f"elapsed <b>{elapsed:.0f}s</b> • ETA <b>{TTS_LIVE['eta']:.0f}s</b> • "
+                f"ends ~<b>{TTS_LIVE['ends_at']}</b></div>")
+
+    def current_partial():
+        if not audio_chunks:
+            return None
+        return (sr_live, np.concatenate([np.asarray(c) for c in audio_chunks]))
+
+    def chunk_text_html(n, total, who, txt):
+        snippet = html.escape(txt[:150]) + ("..." if len(txt) > 150 else "")
+        return f"<div class='audiobook-status'>📝 Now: chunk {n}/{total} [{html.escape(str(who))}]: {snippet}</div>"
+
+    TTS_LIVE.update({"running": True, "stop": False, "t_start": t_start, "beat": t_start,
+                     "chunk": 0, "total": total_chunks, "eta": 0.0, "ends_at": "—",
+                     "paused": False, "label": "TTS MULTI", "job": TTS_LIVE.get("job", 0) + 1})
+    threading.Thread(target=_tts_heartbeat, daemon=True).start()
+    tlog(f"Job started at {start_stamp} — {total_chunks} chunk(s), {len(voice_assignments)} character(s)")
+
     # Process missing chunks
     for i in range(start_idx, total_chunks):
         if i in completed_chunks:
             continue
+        if TTS_CANCEL_EVENT.is_set():
+            cancelled = True
+            tlog(f"Cancelled by user after {done_new} new chunk(s).")
+            break
+
         voice_name, chunk_text = chunks[i]
+        announced_pause = False
+        while TTS_PAUSE_EVENT.is_set() and not TTS_CANCEL_EVENT.is_set():
+            TTS_LIVE["paused"] = True
+            TTS_LIVE["beat"] = time.time()
+            if not announced_pause:
+                tlog(f"⏸️ Paused at chunk {i+1}/{total_chunks} — waiting for resume...")
+                yield (current_partial(),
+                       f"⏸️ Paused at chunk {i+1}/{total_chunks} — press ▶️ Resume to continue",
+                       live_timing(), chunk_text_html(i + 1, total_chunks, voice_name, chunk_text),
+                       gr.update(value="▶️ Resume"))
+                announced_pause = True
+            time.sleep(1)
+        TTS_LIVE["paused"] = False
+        if TTS_CANCEL_EVENT.is_set():
+            cancelled = True
+            tlog(f"Cancelled by user after {done_new} new chunk(s).")
+            break
+
+        TTS_LIVE["chunk"] = i + 1
+        TTS_LIVE["beat"] = time.time()
+        c_start = time.time()
+        TTS_LIVE["cstart"] = c_start
         try:
             if progress is not None:
                 progress((i + 1) / total_chunks, desc=f"Generating chunk {i+1}/{total_chunks}")
+            tlog(f"🎙️ Generating chunk {i+1}/{total_chunks} [{voice_name}] ({len(chunk_text.split())} words): {chunk_text[:80]}...")
             # Validate text before processing
             is_valid, cleaned_text, reason = validate_text_for_generation(chunk_text, voice_name)
             if not is_valid:
@@ -1805,17 +2540,29 @@ def create_multi_voice_audiobook_with_assignments(
             else:
                 voice_config = get_voice_config(voice_library_path, voice_name)
                 if not voice_config:
-                    return None, None, f"❌ Could not load voice config for '{voice_name}'", None
+                    raise RuntimeError(f"could not load voice config for '{voice_name}'")
                 if not voice_config['audio_file']:
-                    return None, None, f"❌ No audio file for voice '{voice_config['display_name']}'", None
+                    raise RuntimeError(f"no audio file for voice '{voice_config['display_name']}'")
                 if not os.path.exists(voice_config['audio_file']):
-                    return None, None, f"❌ Audio file not found: {voice_config['audio_file']}", None
+                    raise RuntimeError(f"audio file not found: {voice_config['audio_file']}")
                 
                 # Use cleaned text for generation
                 chunk_text = cleaned_text
                 
-                # Prepare conditionals from audio prompt
-                conds = processing_model.prepare_conditionals(voice_config['audio_file'], voice_config['exaggeration'])
+                # Prepare conditionals from audio prompt (cached per voice).
+                # Without cache, 200 chunks x 2 voices = 200 redundant embeddings.
+                _ckey = (voice_config['audio_file'], voice_config['exaggeration'])
+                if _ckey in conds_cache:
+                    conds = conds_cache[_ckey]
+                    conds_hits += 1
+                    tlog(f"  Chunk {i+1} reusing cached voice conditioning for '{voice_name}' (hit #{conds_hits})")
+                else:
+                    tlog(f"  Chunk {i+1} conditioning voice '{voice_name}' (first use — embedding takes seconds)...")
+                    _cc0 = time.time()
+                    conds = processing_model.prepare_conditionals(voice_config['audio_file'], voice_config['exaggeration'])
+                    conds_cache[_ckey] = conds
+                    conds_miss += 1
+                    tlog(f"  Chunk {i+1} conditioning done in {time.time()-_cc0:.1f}s (cached: {len(conds_cache)} voice(s))")
                 
                 wav = processing_model.generate(
                     chunk_text, conds,
@@ -1856,9 +2603,44 @@ def create_multi_voice_audiobook_with_assignments(
                 wav_file.setframerate(processing_model.sr)
                 audio_int16 = (audio_np * 32767).astype(np.int16)
                 wav_file.writeframes(audio_int16.tobytes())
-            del wav
+            try:
+                del wav
+            except NameError:
+                pass  # silence-substitution path never created `wav`
+
+            done_new += 1
+            c_elapsed = time.time() - c_start
+            elapsed = time.time() - t_start
+            avg = elapsed / done_new
+            eta = avg * (total_chunks - (i + 1))
+            ends_at = (datetime.now() + timedelta(seconds=max(0, eta))).strftime('%H:%M:%S')
+            last_ends_at = ends_at
+            TTS_LIVE["eta"] = eta
+            TTS_LIVE["ends_at"] = ends_at
+            TTS_LIVE["beat"] = time.time()
+            _rtf_dur = len(np.asarray(audio_chunks[-1]).flatten()) / sr_live if audio_chunks else 0
+            _rtf = _rtf_dur / c_elapsed if c_elapsed > 0 else 0
+            TTS_LIVE["avg"] = avg
+            tlog(f"  Chunk {i+1} done in {c_elapsed:.1f}s | elapsed {elapsed:.0f}s | ETA {eta:.0f}s (ends ~{ends_at}) | {_rtf_dur:.1f}s audio ({_rtf:.2f}× realtime)")
+            if progress is not None:
+                try:
+                    progress((i + 1) / total_chunks,
+                             desc=f"Chunk {i+1}/{total_chunks} done • ETA {eta:.0f}s • ends ~{ends_at}")
+                except Exception:
+                    pass
+            partial = current_partial()
+            yield (partial,
+                   f"🎵 Chunk {i+1}/{total_chunks} [{voice_name}] done • elapsed {elapsed:.0f}s • ETA {eta:.0f}s • ends ~{ends_at}",
+                   live_timing(), chunk_text_html(i + 1, total_chunks, voice_name, chunk_text),
+                   gr.update(value="⏸️ Pause"))
         except Exception as chunk_error_outer:
-            return None, None, f"❌ Outer error processing chunk {i+1} (voice: {voice_name}): {str(chunk_error_outer)}", None
+            tlog(f"❌ Chunk {i+1} [{voice_name}] failed, skipping: {str(chunk_error_outer)[:150]}")
+            failed_list.append((i + 1, str(chunk_error_outer)[:120]))
+            yield (current_partial(),
+                   f"⚠️ Chunk {i+1} failed ({len(failed_list)} failed so far) — continuing...",
+                   live_timing(), chunk_text_html(i + 1, total_chunks, voice_name, chunk_text),
+                   gr.update(value="⏸️ Pause"))
+            continue
         # Autosave every N chunks
         if (i + 1) % autosave_interval == 0 or (i + 1) == total_chunks:
             # Save project metadata
@@ -1871,6 +2653,17 @@ def create_multi_voice_audiobook_with_assignments(
                     'chunks': chunk_info
                 }, f, indent=2)
     # Combine all audio for preview (pauses already included in chunks)
+    TTS_LIVE["stop"] = True
+    TTS_LIVE["running"] = False
+    total_elapsed = time.time() - t_start
+    end_stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if not audio_chunks:
+        tlog("No audio generated — nothing to combine.")
+        yield (None,
+               "❌ No audio generated — all chunks failed.",
+               f"<div class='audiobook-status'>⏱️ Started {start_stamp} • ended {end_stamp} • elapsed {total_elapsed:.1f}s • 0 chunks produced audio</div>",
+               "", gr.update(value="⏸️ Pause"))
+        return
     combined_audio = np.concatenate(audio_chunks)
     
     total_words = sum(len(chunk[1].split()) for chunk in chunks)
@@ -1878,14 +2671,32 @@ def create_multi_voice_audiobook_with_assignments(
     assignment_summary = "\n".join([f"🎭 [{char}] → {assigned_voice}" for char, assigned_voice in voice_assignments.items()])
     
     pause_info = f" (including {total_pause_duration:.1f}s of pauses)" if total_pause_duration > 0 else ""
-    success_msg = (f"✅ Multi-voice audiobook created successfully!\n"
+    if cancelled:
+        head = f"🛑 Cancelled by user — partial multi-voice audiobook ({len(audio_chunks)} chunks)"
+    elif failed_list:
+        failed_nums = ", ".join(str(n) for n, _ in failed_list)
+        head = f"⚠️ Multi-voice audiobook finished with {len(failed_list)} failed chunk(s) skipped: {failed_nums}"
+    else:
+        head = "✅ Multi-voice audiobook created successfully!"
+    timing_info = (f"\n⏱️ Started: {start_stamp} • Ended: {end_stamp} • Total: {total_elapsed:.1f}s"
+                   f" • Avg: {total_elapsed / max(done_new, 1):.1f}s/chunk")
+    if cancelled or failed_list:
+        timing_info += f" • Last projected end: {last_ends_at}"
+    success_msg = (f"{head}\n"
                    f"📊 {total_words:,} words in {total_chunks} chunks\n"
                    f"🎭 Characters: {len(voice_assignments)}\n"
                    f"⏱️ Duration: ~{duration_minutes} minutes{pause_info}\n"
                    f"📁 Saved to: {project_dir}\n"
                    f"🎵 Files: {len(audio_chunks)} audio chunks\n"
-                   f"\nVoice Assignments:\n{assignment_summary}")
-    return (processing_model.sr, combined_audio), None, success_msg, None
+                   f"\nVoice Assignments:\n{assignment_summary}{timing_info}")
+    tlog(f"FINISHED at {end_stamp} | total {total_elapsed:.1f}s | {len(audio_chunks)} chunks | {project_dir}")
+    tlog(f"Voice conditioning: {conds_miss} embedded, {conds_hits} cache hits")
+    final_timing = (f"<div class='audiobook-status'>⏱️ Started <b>{start_stamp}</b> • ended <b>{end_stamp}</b> • "
+                    f"total <b>{total_elapsed:.1f}s</b> • avg <b>{total_elapsed / max(done_new, 1):.1f}s/chunk</b></div>")
+    yield ((processing_model.sr, combined_audio), success_msg, final_timing, "",
+           gr.update(value="⏸️ Pause"))
+    print(f"[WAVEFORM] {len(combined_audio)/(processing_model.sr or 24000):.1f}s:\n{_waveform_ascii(combined_audio)}", flush=True)
+    _session_add("TTS MULTI", len(combined_audio) / (processing_model.sr or 24000), total_elapsed)
 
 def handle_multi_voice_analysis(text_content, voice_library_path):
     """
@@ -2941,14 +3752,17 @@ def get_project_chunks(project_name: str) -> list:
     print(f"📊 Returning {len(chunks)} chunks for project '{project_name}'")
     return chunks
 
+@logged_job("REGEN")
 def regenerate_single_chunk(model, project_name: str, chunk_num: int, voice_library_path: str, custom_text: str = None, language_id: str = "en") -> tuple:
     """Regenerate a single chunk from a project"""
     # Check if model is None and load it if needed
     if model is None:
         print("⚠️ Model is None in regenerate_single_chunk, loading model...")
-        model = load_model()
+        model = load_model(language_id)
         if model is None:
             return None, "❌ Failed to load TTS model for regeneration"
+    # Bengali routes to the Bangla fine-tune singleton (rest stays multilingual)
+    model = _resolve_model_for_language(model, language_id)
     
     chunks = get_project_chunks(project_name)
     
@@ -3133,6 +3947,11 @@ def regenerate_single_chunk(model, project_name: str, chunk_num: int, voice_libr
         status_msg = f"✅ Chunk {chunk_num} regenerated successfully!\n🎭 Voice: {voice_display}\n📝 Text: {text_to_regenerate[:100]}{'...' if len(text_to_regenerate) > 100 else ''}\n💾 Temp file: {temp_filename}"
         
         # Return the temp file path instead of the audio tuple
+        try:
+            _rsr2 = getattr(model, "sr", 24000) if model else 24000
+            print(f"[WAVEFORM] {len(audio_output)/_rsr2:.1f}s:\n{_waveform_ascii(audio_output)}", flush=True)
+        except Exception:
+            pass
         return temp_file_path, status_msg
         
     except Exception as e:
@@ -3290,6 +4109,7 @@ def load_project_chunks_for_interface(project_name: str, page_num: int = 1, chun
         *interface_updates
     )
 
+@logged_job("COMBINE-WAV")
 def combine_project_audio_chunks(project_name: str, output_format: str = "wav") -> tuple:
     """Combine all audio chunks from a project into a single downloadable file"""
     if not project_name:
@@ -3955,6 +4775,7 @@ def save_all_pending_trims_and_combine(project_name: str, loaded_chunks_data: li
         
     return final_status_message
 
+@logged_job("COMBINE")
 def combine_project_audio_chunks_split(project_name: str, chunks_per_file: int = 50, output_format: str = "mp3") -> str:
     """Create multiple smaller downloadable MP3 files from project chunks"""
     if not project_name:
@@ -4333,25 +5154,39 @@ def create_audiobook_with_original_voice_metadata(
     """Create audiobook but save original voice name in metadata (for volume normalization)"""
     # This is a modified version of create_audiobook that preserves the original voice name in metadata
     # while using a temporary voice for generation
+    # NOTE: generator — yields (audio, status, timing, chunk_text, pause_btn) live per chunk.
+    
+    def _s5(audio, status):
+        return (audio, status,
+                "<div class='audiobook-status'>⏱️ Timing info will appear here...</div>",
+                "", gr.update(value="⏸️ Pause"))
     
     if not text_content or not text_content.strip():
-        return None, "❌ No text content provided"
+        yield _s5(None, "❌ No text content provided")
+        return
     
     if not selected_voice:
-        return None, "❌ No voice selected"
+        yield _s5(None, "❌ No voice selected")
+        return
     
     if not project_name or not project_name.strip():
-        return None, "❌ No project name provided"
+        yield _s5(None, "❌ No project name provided")
+        return
     
     # Load voice configuration (using the temporary voice for generation)
     voice_config = get_voice_config(voice_library_path, selected_voice)
     if not voice_config:
-        return None, f"❌ Could not load voice configuration for '{selected_voice}'"
+        yield _s5(None, f"❌ Could not load voice configuration for '{selected_voice}'")
+        return
     
     # Load original voice configuration for metadata
     original_voice_config = get_voice_config(voice_library_path, original_voice_name)
     if not original_voice_config:
-        return None, f"❌ Could not load original voice configuration for '{original_voice_name}'"
+        yield _s5(None, f"❌ Could not load original voice configuration for '{original_voice_name}'")
+        return
+
+    # Bengali routes to the Bangla fine-tune singleton (rest stays multilingual)
+    model = _resolve_model_for_language(model, language_id)
     
     # Create project directory
     output_dir = "audiobook_projects"
@@ -4384,7 +5219,8 @@ def create_audiobook_with_original_voice_metadata(
     total_chunks = len(chunks)
     
     if not chunks:
-        return None, "❌ No text chunks generated"
+        yield _s5(None, "❌ No text chunks generated")
+        return
     
     # Filter out already completed chunks if resuming
     if resume and existing_chunks:
@@ -4395,17 +5231,81 @@ def create_audiobook_with_original_voice_metadata(
         chunks_to_process = [(i, chunk) for i, chunk in enumerate(chunks, 1)]
     
     if not chunks_to_process:
-        return None, "✅ All chunks already completed! Use 'Load Previous Project' to access the audio."
+        yield _s5(None, "✅ All chunks already completed! Use 'Load Previous Project' to access the audio.")
+        return
+    
+    # Realtime run state: timing, heartbeat, cancel/pause
+    t_start = time.time()
+    start_stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    TTS_CANCEL_EVENT.clear()
+    TTS_PAUSE_EVENT.clear()
+    sr_live = getattr(model, "sr", 24000) if model else 24000
+    failed_list = []
+    cancelled = False
+    done_new = 0
+    last_ends_at = "—"
+
+    def tlog(msg):
+        print(f"[TTS SINGLE {time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
+    def live_timing():
+        elapsed = time.time() - t_start
+        return (f"<div class='audiobook-status'>⏳ Generating... chunk {TTS_LIVE['chunk']}/{TTS_LIVE['total']} • "
+                f"elapsed <b>{elapsed:.0f}s</b> • ETA <b>{TTS_LIVE['eta']:.0f}s</b> • "
+                f"ends ~<b>{TTS_LIVE['ends_at']}</b></div>")
+
+    def current_partial():
+        if not audio_chunks:
+            return None
+        parts = [c.squeeze(0).cpu().numpy() if hasattr(c, 'cpu') else np.asarray(c) for c in audio_chunks]
+        return (sr_live, np.concatenate(parts))
+
+    def chunk_text_html(n, total, txt):
+        snippet = html.escape(txt[:150]) + ("..." if len(txt) > 150 else "")
+        return f"<div class='audiobook-status'>📝 Now: chunk {n}/{total}: {snippet}</div>"
+
+    TTS_LIVE.update({"running": True, "stop": False, "t_start": t_start, "beat": t_start,
+                     "chunk": 0, "total": len(chunks_to_process), "eta": 0.0, "ends_at": "—",
+                     "paused": False, "label": "TTS SINGLE", "job": TTS_LIVE.get("job", 0) + 1})
+    threading.Thread(target=_tts_heartbeat, daemon=True).start()
+    tlog(f"Job started at {start_stamp} — {len(chunks_to_process)} chunk(s) to process")
     
     # Generate audio for each chunk
     audio_chunks = []
     chunk_info_list = []
     
     for i, (chunk_num, chunk_text) in enumerate(chunks_to_process):
+        if TTS_CANCEL_EVENT.is_set():
+            cancelled = True
+            tlog(f"Cancelled by user after {done_new} new chunk(s).")
+            break
+
+        announced_pause = False
+        while TTS_PAUSE_EVENT.is_set() and not TTS_CANCEL_EVENT.is_set():
+            TTS_LIVE["paused"] = True
+            TTS_LIVE["beat"] = time.time()
+            if not announced_pause:
+                tlog(f"⏸️ Paused at chunk {chunk_num}/{total_chunks} — waiting for resume...")
+                yield (current_partial(),
+                       f"⏸️ Paused at chunk {chunk_num}/{total_chunks} — press ▶️ Resume to continue",
+                       live_timing(), chunk_text_html(chunk_num, total_chunks, chunk_text),
+                       gr.update(value="▶️ Resume"))
+                announced_pause = True
+            time.sleep(1)
+        TTS_LIVE["paused"] = False
+        if TTS_CANCEL_EVENT.is_set():
+            cancelled = True
+            tlog(f"Cancelled by user after {done_new} new chunk(s).")
+            break
+
+        TTS_LIVE["chunk"] = i + 1
+        TTS_LIVE["beat"] = time.time()
+        c_start = time.time()
+        TTS_LIVE["cstart"] = c_start
         try:
             if progress is not None:
                 progress((i + 1) / len(chunks_to_process), desc=f"Generating chunk {i+1}/{len(chunks_to_process)}")
-            print(f"🎙️ Generating chunk {chunk_num}/{total_chunks}: {chunk_text[:50]}...")
+            tlog(f"🎙️ Generating chunk {chunk_num}/{total_chunks} ({len(chunk_text.split())} words): {chunk_text[:80]}...")
             
             # Generate audio using the temporary voice
             audio_data = generate_with_retry(
@@ -4419,7 +5319,7 @@ def create_audiobook_with_original_voice_metadata(
             )
             
             if audio_data is None:
-                return None, f"❌ Failed to generate audio for chunk {chunk_num}"
+                raise RuntimeError(f"generation returned no audio for chunk {chunk_num}")
             
             # Convert tensor to numpy array if needed for pause processing
             if hasattr(audio_data, 'cpu'):
@@ -4464,12 +5364,44 @@ def create_audiobook_with_original_voice_metadata(
                 'duration': len(audio_data) / sample_rate
             }
             chunk_info_list.append(chunk_info)
+
+            done_new += 1
+            c_elapsed = time.time() - c_start
+            elapsed = time.time() - t_start
+            avg = elapsed / done_new
+            eta = avg * (len(chunks_to_process) - (i + 1))
+            ends_at = (datetime.now() + timedelta(seconds=max(0, eta))).strftime('%H:%M:%S')
+            last_ends_at = ends_at
+            TTS_LIVE["eta"] = eta
+            TTS_LIVE["ends_at"] = ends_at
+            TTS_LIVE["beat"] = time.time()
+            _last = audio_chunks[-1]
+            _last = _last.squeeze(0).cpu().numpy() if hasattr(_last, 'cpu') else np.asarray(_last).flatten()
+            _rtf_dur = len(_last) / sr_live if sr_live else 0
+            _rtf = _rtf_dur / c_elapsed if c_elapsed > 0 else 0
+            TTS_LIVE["avg"] = avg
+            tlog(f"  Chunk {chunk_num} done in {c_elapsed:.1f}s | elapsed {elapsed:.0f}s | ETA {eta:.0f}s (ends ~{ends_at}) | {_rtf_dur:.1f}s audio ({_rtf:.2f}× realtime)")
+            if progress is not None:
+                try:
+                    progress((i + 1) / len(chunks_to_process),
+                             desc=f"Chunk {i+1}/{len(chunks_to_process)} done • ETA {eta:.0f}s • ends ~{ends_at}")
+                except Exception:
+                    pass
+            yield (current_partial(),
+                   f"🎵 Chunk {chunk_num}/{total_chunks} done • elapsed {elapsed:.0f}s • ETA {eta:.0f}s • ends ~{ends_at}",
+                   live_timing(), chunk_text_html(chunk_num, total_chunks, chunk_text),
+                   gr.update(value="⏸️ Pause"))
             
         except Exception as e:
             import traceback
             traceback.print_exc()
-            error_message = f"❌ Error generating chunk {chunk_num}: {e}"
-            return None, error_message, None, None
+            tlog(f"❌ Chunk {chunk_num} failed, skipping: {e}")
+            failed_list.append((chunk_num, str(e)[:120]))
+            yield (current_partial(),
+                   f"⚠️ Chunk {chunk_num} failed ({len(failed_list)} failed so far) — continuing...",
+                   live_timing(), chunk_text_html(chunk_num, total_chunks, chunk_text),
+                   gr.update(value="⏸️ Pause"))
+            continue
         
         # Autosave every N chunks
         if (i + 1) % autosave_interval == 0 or (i + 1) == len(chunks_to_process):
@@ -4498,6 +5430,17 @@ def create_audiobook_with_original_voice_metadata(
             )
     
     # Combine all audio for preview
+    TTS_LIVE["stop"] = True
+    TTS_LIVE["running"] = False
+    total_elapsed = time.time() - t_start
+    end_stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if not audio_chunks:
+        tlog("No audio generated — nothing to combine.")
+        yield (None,
+               "❌ No audio generated — all chunks failed.",
+               f"<div class='audiobook-status'>⏱️ Started {start_stamp} • ended {end_stamp} • elapsed {total_elapsed:.1f}s • 0 chunks produced audio</div>",
+               "", gr.update(value="⏸️ Pause"))
+        return
     # Convert all chunks to numpy arrays first
     numpy_chunks = []
     for chunk in audio_chunks:
@@ -4526,8 +5469,26 @@ def create_audiobook_with_original_voice_metadata(
     duration_minutes = len(combined_audio) // (getattr(model, "sr", 24000) if model else 24000) // 60
     
     pause_info = f" (including {total_pause_duration:.1f}s of pauses)" if total_pause_duration > 0 else ""
-    success_msg = f"✅ Audiobook created successfully!\n🎭 Voice: {original_voice_config['display_name']}\n📊 {total_words:,} words in {total_chunks} chunks\n⏱️ Duration: ~{duration_minutes} minutes{pause_info}\n📁 Saved to: {project_dir}\n🎵 Files: {len(audio_chunks)} audio chunks\n💾 Metadata saved for regeneration"
-    return (getattr(model, "sr", 24000) if model else 24000, combined_audio), success_msg
+    if cancelled:
+        head = f"🛑 Cancelled by user — partial audiobook ({len(audio_chunks)} chunks)"
+    elif failed_list:
+        failed_nums = ", ".join(str(n) for n, _ in failed_list)
+        head = f"⚠️ Audiobook finished with {len(failed_list)} failed chunk(s) skipped: {failed_nums}"
+    else:
+        head = "✅ Audiobook created successfully!"
+    timing_info = (f"\n⏱️ Started: {start_stamp} • Ended: {end_stamp} • Total: {total_elapsed:.1f}s"
+                   f" • Avg: {total_elapsed / max(done_new, 1):.1f}s/chunk")
+    if cancelled or failed_list:
+        timing_info += f" • Last projected end: {last_ends_at}"
+    success_msg = f"{head}\n🎭 Voice: {original_voice_config['display_name']}\n📊 {total_words:,} words in {total_chunks} chunks\n⏱️ Duration: ~{duration_minutes} minutes{pause_info}\n📁 Saved to: {project_dir}\n🎵 Files: {len(audio_chunks)} audio chunks\n💾 Metadata saved for regeneration{timing_info}"
+    tlog(f"FINISHED at {end_stamp} | total {total_elapsed:.1f}s | {len(audio_chunks)} chunks | {project_dir}")
+    final_timing = (f"<div class='audiobook-status'>⏱️ Started <b>{start_stamp}</b> • ended <b>{end_stamp}</b> • "
+                    f"total <b>{total_elapsed:.1f}s</b> • avg <b>{total_elapsed / max(done_new, 1):.1f}s/chunk</b></div>")
+    yield ((getattr(model, "sr", 24000) if model else 24000, combined_audio), success_msg,
+           final_timing, "", gr.update(value="⏸️ Pause"))
+    _ssr = (getattr(model, "sr", 24000) if model else 24000) or 24000
+    print(f"[WAVEFORM] {len(combined_audio)/_ssr:.1f}s:\n{_waveform_ascii(combined_audio)}", flush=True)
+    _session_add("TTS SINGLE", len(combined_audio) / _ssr, total_elapsed)
 
 def create_audiobook_with_volume_settings(model, text_content, voice_library_path, selected_voice, project_name, 
                                          enable_norm=True, target_level=-18.0, language_id="en", progress=gr.Progress(track_tqdm=True)):
@@ -4554,20 +5515,23 @@ def create_audiobook_with_volume_settings(model, text_content, voice_library_pat
         )
         
         # Use the temporary voice for audiobook creation, but preserve original voice name in metadata
-        result = create_audiobook_with_original_voice_metadata(
+        # Stream live yields through to the UI
+        for item in create_audiobook_with_original_voice_metadata(
             model, text_content, voice_library_path, temp_voice_name, project_name, selected_voice,
             language_id=language_id, progress=progress
-        )
+        ):
+            yield item
         
         # Clean up temporary voice
         try:
             delete_voice_profile(voice_library_path, temp_voice_name)
         except:
             pass
-        
-        return result
     else:
-        return create_audiobook(model, text_content, voice_library_path, selected_voice, project_name, language_id=language_id, progress=progress)
+        audio, status = create_audiobook(model, text_content, voice_library_path, selected_voice, project_name, language_id=language_id, progress=progress)
+        yield (audio, status,
+               "<div class='audiobook-status'>⏱️ Timing info will appear here...</div>",
+               "", gr.update(value="⏸️ Pause"))
 
 def create_multi_voice_audiobook_with_original_voice_metadata(
     model,
@@ -4586,13 +5550,17 @@ def create_multi_voice_audiobook_with_original_voice_metadata(
     # while using temporary voices for generation
     
     # Use the existing multi-voice function with temp assignments for generation
-    result = create_multi_voice_audiobook_with_assignments(
+    # Stream live yields through, capture the final one for the metadata fix-up below
+    result = None
+    for item in create_multi_voice_audiobook_with_assignments(
         model, text_content, voice_library_path, project_name, temp_voice_assignments, resume, autosave_interval,
         language_id=language_id, progress=progress
-    )
+    ):
+        result = item
+        yield item
     
     # After creation, update the metadata to use original voice names
-    if result[0] is not None:  # If successful
+    if result is not None and result[0] is not None:  # If successful
         try:
             # Load and update the project metadata
             output_dir = "audiobook_projects"
@@ -4642,7 +5610,8 @@ def create_multi_voice_audiobook_with_original_voice_metadata(
         except Exception as e:
             print(f"⚠️ Warning: Could not update metadata with original voice names: {str(e)}")
     
-    return result
+    # Final value already streamed via yields above; nothing more to emit
+    return
 
 def create_multi_voice_audiobook_with_volume_settings(model, text_content, voice_library_path, project_name, 
                                                      voice_assignments, enable_norm=True, target_level=-18.0, language_id="en", progress=gr.Progress(track_tqdm=True)):
@@ -4671,10 +5640,12 @@ def create_multi_voice_audiobook_with_volume_settings(model, text_content, voice
                 temp_assignments[character] = voice_name
         
         # Use temporary voices for audiobook creation but preserve original voice names in metadata
-        result = create_multi_voice_audiobook_with_original_voice_metadata(
+        # Stream live yields through to the UI
+        for item in create_multi_voice_audiobook_with_original_voice_metadata(
             model, text_content, voice_library_path, project_name, temp_assignments, voice_assignments,
             language_id=language_id, progress=progress
-        )
+        ):
+            yield item
         
         # Clean up temporary voices
         for character, temp_voice_name in temp_assignments.items():
@@ -4683,13 +5654,12 @@ def create_multi_voice_audiobook_with_volume_settings(model, text_content, voice
                     delete_voice_profile(voice_library_path, temp_voice_name)
                 except:
                     pass
-        
-        return result
     else:
-        return create_multi_voice_audiobook_with_assignments(
+        for item in create_multi_voice_audiobook_with_assignments(
             model, text_content, voice_library_path, project_name, voice_assignments,
             language_id=language_id, progress=progress
-        )
+        ):
+            yield item
 
 # =============================================================================
 # END VOLUME NORMALIZATION WRAPPER FUNCTIONS  
@@ -4766,6 +5736,7 @@ def validate_batch_audiobook_input(file_list: list, selected_voice: str, project
     
     return gr.Button(interactive=True), status_msg, None
 
+@logged_job("BATCH")
 def create_batch_audiobook(
     model,
     file_list: list,
@@ -4812,18 +5783,23 @@ def create_batch_audiobook(
     last_audio = None
     
     try:
+        b_start = time.time()
+        print(f"[BATCH {time.strftime('%H:%M:%S')}] START {total_files} file(s), {sum(f['words'] for f in file_list):,} words, voice='{selected_voice}'", flush=True)
         # Process each file in the batch
         for i, file_info in enumerate(file_list, 1):
             try:
                 # Create project name with suffix
                 current_project_name = f"{project_name}-{i}"
-                
-                print(f"\n🎵 Processing file {i}/{total_files}: {file_info['filename']} -> {current_project_name}")
+                f_start = time.time()
+                print(f"\n[BATCH {time.strftime('%H:%M:%S')}] File {i}/{total_files} START '{file_info['filename']}' -> '{current_project_name}' | {file_info['words']:,} words", flush=True)
+                print(f"🎵 Processing file {i}/{total_files}: {file_info['filename']} -> {current_project_name}")
                 print(f"📝 Text length: {file_info['words']} words")
                 print("🔄 Generating audio chunks...")
                 
                 # Create audiobook for this file with visible progress
-                result = create_audiobook_with_volume_settings(
+                # (streaming generator — drain to the final value for batch use)
+                result = None
+                for item in create_audiobook_with_volume_settings(
                     model=model,
                     text_content=file_info['content'],
                     voice_library_path=voice_library_path,
@@ -4833,7 +5809,8 @@ def create_batch_audiobook(
                     target_level=target_level,
                     language_id=language_id,
                     progress=progress
-                )
+                ):
+                    result = item
                 
                 if result and len(result) >= 2 and result[0] is not None:
                     # Success
@@ -4843,7 +5820,15 @@ def create_batch_audiobook(
                         'filename': file_info['filename'],
                         'words': file_info['words']
                     })
+                    f_dur = time.time() - f_start
+                    _fa = len(last_audio[1]) / last_audio[0] if last_audio and len(last_audio) > 1 else 0
+                    print(f"[BATCH {time.strftime('%H:%M:%S')}] File {i}/{total_files} DONE '{current_project_name}' in {f_dur:.1f}s | {_fa:.1f}s audio | ok={len(successful_projects)} failed={len(failed_projects)} | elapsed {time.time()-b_start:.0f}s | RAM {_rss_mb():.0f}MB", flush=True)
                     print(f"✅ Completed: {current_project_name}")
+                    try:
+                        print(f"[WAVEFORM] {_fa:.1f}s:\n{_waveform_ascii(last_audio[1])}", flush=True)
+                    except Exception:
+                        pass
+                    _session_add("BATCH-FILE", _fa, f_dur)
                 else:
                     # Failed
                     error_msg = result[1] if result and len(result) > 1 else "Unknown error"
@@ -4898,6 +5883,7 @@ def create_batch_audiobook(
 # =============================================================================
 
 with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
+    print("[STARTUP] Building Gradio UI (thousands of components, terminal quiet)...", flush=True)
     model_state = gr.State(None)
     vc_model_state = gr.State(None)
     voice_library_path_state = gr.State(SAVED_VOICE_LIBRARY_PATH)
@@ -4916,7 +5902,7 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
             with gr.Row():
                 with gr.Column():
                     text = gr.Textbox(
-                        value="Welcome to Chatterbox TTS Audiobook Edition. This tool will help you create amazing audiobooks with consistent character voices.",
+                        value=DEFAULT_TEXTS["en"],
                         label="Text to synthesize",
                         lines=3
                     )
@@ -5038,6 +6024,7 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
                     with gr.Row():
                         vc_refresh_voices_btn = gr.Button("🔄 Refresh Voices", size="sm")
                         vc_convert_btn = gr.Button("🔄 Convert Voice", variant="primary", size="lg")
+                        vc_cancel_btn = gr.Button("🛑 Cancel", size="sm", variant="stop")
 
                 with gr.Column():
                     gr.HTML("<h3>🎧 Output</h3>")
@@ -5046,15 +6033,25 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
                     vc_status = gr.HTML(
                         "<div class='voice-status'>Ready to convert. Upload source audio, select a target voice, and click Convert.</div>"
                     )
+                    vc_compare_original = gr.Audio(label="Original Audio")
+                    vc_timing = gr.HTML(
+                        "<div class='voice-status'>⏱️ Timing info will appear here (start time, elapsed, ETA)...</div>"
+                    )
+                    vc_chunk_files = gr.File(
+                        label="📦 Per-chunk converted files",
+                        file_count="multiple",
+                        type="filepath"
+                    )
                     
                     gr.HTML("""
                     <div class="instruction-box">
                         <h4>💡 Voice Conversion Tips:</h4>
                         <ul>
-                            <li><strong>Source Audio:</strong> Any speech audio that you want to convert</li>
+                            <li><strong>Source Audio:</strong> Any length — long files are auto-split into 30s chunks, converted, and stitched</li>
                             <li><strong>Target Voice:</strong> The voice you want the output to sound like (10-30s reference)</li>
                             <li><strong>Quality:</strong> Clean source audio with minimal background noise works best</li>
                             <li><strong>Preservation:</strong> The converter preserves speaking style and cadence from the source</li>
+                            <li><strong>Progress:</strong> Watch chunk X/Y, elapsed time and ETA here and live in the terminal — 🛑 Cancel stops after the current chunk (partial result kept)</li>
                         </ul>
                     </div>
                     """)
@@ -5181,7 +6178,7 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
                                 interactive=True
                             )
                             
-                            target_volume_level = gr.Slider(
+                            vl_target_volume_level = gr.Slider(
                                 -30.0, -6.0, 
                                 step=0.5,
                                 label="Target Level (dB RMS)",
@@ -5191,7 +6188,7 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
                             )
                         
                         # Volume status display
-                        volume_status = gr.HTML(
+                        vl_volume_status = gr.HTML(
                             "<div class='voice-status'>🔧 Volume normalization disabled</div>"
                         )
                     
@@ -5297,7 +6294,7 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
                             info="Load or resume an existing project"
                         )
                         with gr.Row():
-                            load_project_btn = gr.Button("📂 Load Project", size="sm", variant="secondary")
+                            load_sample_project_btn = gr.Button("📂 Load Project", size="sm", variant="secondary")
                             resume_project_btn = gr.Button("▶️ Resume Project", size="sm", variant="primary")
                         single_project_progress = gr.HTML("<div class='voice-status'>No project loaded</div>")
                 
@@ -5434,6 +6431,10 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
                             size="lg",
                             interactive=False
                         )
+                
+                with gr.Row():
+                    single_cancel_btn = gr.Button("🛑 Cancel", size="sm", variant="stop")
+                    single_pause_btn = gr.Button("⏸️ Pause", size="sm", variant="secondary")
 
                 # Batch processing buttons (hidden by default)
                 with gr.Group(visible=False) as batch_processing_group:
@@ -5454,6 +6455,12 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
                 # Status and progress
                 audiobook_status = gr.HTML(
                     "<div class='audiobook-status'>📋 Ready to create audiobooks! Load text, select voice, and set project name.</div>"
+                )
+                audiobook_timing = gr.HTML(
+                    "<div class='audiobook-status'>⏱️ Timing info will appear here (start time, elapsed, ETA)...</div>"
+                )
+                audiobook_chunktxt = gr.HTML(
+                    "<div class='audiobook-status'>📝 Current chunk text will appear here...</div>"
                 )
                 
                 # Preview/Output area
@@ -5736,9 +6743,19 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
                         interactive=False
                     )
                 
+                with gr.Row():
+                    multi_cancel_btn = gr.Button("🛑 Cancel", size="sm", variant="stop")
+                    multi_pause_btn = gr.Button("⏸️ Pause", size="sm", variant="secondary")
+                
                 # Status and progress
                 multi_audiobook_status = gr.HTML(
                     "<div class='audiobook-status'>📋 Step 1: Analyze text to find characters<br/>📋 Step 2: Assign voices to each character<br/>📋 Step 3: Validate and create audiobook</div>"
+                )
+                multi_audiobook_timing = gr.HTML(
+                    "<div class='audiobook-status'>⏱️ Timing info will appear here (start time, elapsed, ETA)...</div>"
+                )
+                multi_audiobook_chunktxt = gr.HTML(
+                    "<div class='audiobook-status'>📝 Current chunk text will appear here...</div>"
                 )
                 
                 # Preview/Output area
@@ -6264,7 +7281,10 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
             total_pages_state = gr.State(1)     
 
             # Load initial voice list and model
-    demo.load(fn=load_model, inputs=[], outputs=model_state)
+            # NOTE: no model preload by design — YOU decide the language after the
+            # UI opens; the right model (multilingual or Bangla) lazy-loads on the
+            # first Generate/Create click via load_model(language_id). This keeps
+            # startup fast and RAM empty until needed.
     demo.load(
         fn=lambda: refresh_voice_list(SAVED_VOICE_LIBRARY_PATH),
         inputs=[],
@@ -6281,24 +7301,19 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
         outputs=audiobook_voice_selector
     )
     demo.load(
-        fn=lambda: get_project_choices(),
+        fn=force_refresh_single_project_dropdown,
         inputs=[],
         outputs=previous_project_dropdown
     )
     demo.load(
-        fn=lambda: get_project_choices(),
+        fn=force_refresh_single_project_dropdown,
         inputs=[],
         outputs=multi_previous_project_dropdown
     )
     
-    # Load project dropdowns for regenerate tabs
+    # Load project dropdowns for regenerate tabs (single load — was duplicated)
     demo.load(
-        fn=lambda: get_project_choices(),
-        inputs=[],
-        outputs=project_dropdown
-    )
-    demo.load(
-        fn=lambda: get_project_choices(),
+        fn=force_refresh_single_project_dropdown,
         inputs=[],
         outputs=project_dropdown
     )
@@ -6308,6 +7323,23 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
         fn=lambda path, voice: load_voice_for_tts(path, voice),
         inputs=[voice_library_path_state, tts_voice_selector],
         outputs=[ref_wav, exaggeration, cfg_weight, temp, ref_wav, tts_voice_status]
+    )
+
+    # Auto-fill sample text when the language changes (never wipes typed text)
+    tts_language.change(
+        fn=apply_default_text,
+        inputs=[tts_language, text],
+        outputs=[text]
+    )
+    audiobook_language.change(
+        fn=apply_default_text,
+        inputs=[audiobook_language, audiobook_text],
+        outputs=[audiobook_text]
+    )
+    multi_language.change(
+        fn=apply_default_text,
+        inputs=[multi_language, multi_audiobook_text],
+        outputs=[multi_audiobook_text]
     )
 
     # Refresh voices in TTS tab
@@ -6339,8 +7371,10 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
 
     # Voice Conversion Functions
     
-    # Load VC model on startup
-    demo.load(fn=load_vc_model, inputs=[], outputs=vc_model_state)
+    # VC model loads lazily on first Convert click (NOT at startup).
+    # Reason: holding TTS + VC weights resident together OOM-kills low-RAM machines.
+    # vc_convert_chunked() already handles vc_model=None by loading on demand.
+    # (Previously: demo.load(fn=load_vc_model, ...) here — removed for memory safety.)
     
     # Refresh VC voices
     demo.load(
@@ -6378,16 +7412,22 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
         outputs=vc_voice_selector
     )
     
-    # VC Convert button
+    # VC Convert button (any-length, chunked, realtime streaming yields)
     def vc_convert_handler(vc_model, source_audio, vc_target_audio_path, voice_selector, progress=gr.Progress(track_tqdm=True)):
-        """Handle voice conversion"""
-        progress(0.1, desc="Starting voice conversion...")
-        return vc_convert(vc_model, source_audio, vc_target_audio_path)
+        """Handle voice conversion — streams live updates per chunk"""
+        yield from vc_convert_chunked(vc_model, source_audio, vc_target_audio_path, progress=progress)
     
     vc_convert_btn.click(
         fn=vc_convert_handler,
         inputs=[vc_model_state, vc_source_audio, vc_target_audio, vc_voice_selector],
-        outputs=[vc_output, vc_status]
+        outputs=[vc_output, vc_status, vc_timing, vc_chunk_files, vc_compare_original]
+    )
+
+    # VC Cancel button — stops after the current chunk (partial result kept)
+    vc_cancel_btn.click(
+        fn=vc_request_cancel,
+        inputs=[],
+        outputs=[vc_status]
     )
 
     # Voice Library Functions
@@ -6422,7 +7462,7 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
         inputs=[
             voice_library_path_state, voice_name, voice_display_name, voice_description,
             voice_audio, voice_exaggeration, voice_cfg, voice_temp, 
-            enable_voice_normalization, target_volume_level,
+            enable_voice_normalization, vl_target_volume_level,
             voice_min_p, voice_top_p, voice_repetition_penalty,
             tts_language
         ],
@@ -6532,11 +7572,22 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
     process_btn.click(
         fn=create_audiobook_with_volume_settings,
         inputs=[model_state, audiobook_text, voice_library_path_state, audiobook_voice_selector, project_name, enable_volume_norm, target_volume_level, audiobook_language],
-        outputs=[audiobook_output, audiobook_status]
+        outputs=[audiobook_output, audiobook_status, audiobook_timing, audiobook_chunktxt, single_pause_btn]
     ).then(
         fn=force_refresh_all_project_dropdowns,
         inputs=[],
         outputs=[previous_project_dropdown, multi_previous_project_dropdown, project_dropdown]
+    )
+
+    single_cancel_btn.click(
+        fn=tts_request_cancel,
+        inputs=[],
+        outputs=[audiobook_status]
+    )
+    single_pause_btn.click(
+        fn=tts_toggle_pause,
+        inputs=[],
+        outputs=[single_pause_btn]
     )
     
     # Text analysis to find characters and populate dropdowns
@@ -6562,11 +7613,22 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
     process_multi_btn.click(
         fn=create_multi_voice_audiobook_with_volume_settings,
         inputs=[model_state, multi_audiobook_text, voice_library_path_state, multi_project_name, voice_assignments_state, multi_enable_volume_norm, multi_target_volume_level, multi_language],
-        outputs=[multi_audiobook_output, multi_audiobook_status]
+        outputs=[multi_audiobook_output, multi_audiobook_status, multi_audiobook_timing, multi_audiobook_chunktxt, multi_pause_btn]
     ).then(
         fn=force_refresh_all_project_dropdowns,
         inputs=[],
         outputs=[previous_project_dropdown, multi_previous_project_dropdown, project_dropdown]
+    )
+
+    multi_cancel_btn.click(
+        fn=tts_request_cancel,
+        inputs=[],
+        outputs=[multi_audiobook_status]
+    )
+    multi_pause_btn.click(
+        fn=tts_toggle_pause,
+        inputs=[],
+        outputs=[multi_pause_btn]
     )
     
     # Refresh voices for multi-voice (updates dropdown choices)
@@ -7032,7 +8094,7 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
 
     # --- Wire up the buttons in the UI logic ---
 
-    load_project_btn.click(
+    load_sample_project_btn.click(
         fn=load_single_voice_project,
         inputs=single_project_dropdown,
         outputs=[audiobook_text, audiobook_voice_selector, project_name, single_project_progress]
@@ -7045,12 +8107,6 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
     )
 
     # Download project button
-    download_project_btn.click(
-        fn=combine_project_audio_chunks_split,  # Use the new split function  
-        inputs=[current_project_name],
-        outputs=[download_status]
-    )
-
     # NEW: Regenerate Sample Tab Functions
     
     # NEW: Listen & Edit Event Handlers
@@ -7182,13 +8238,7 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
         outputs=project_dropdown
     )
     
-    # Refresh projects dropdown
-    refresh_projects_btn.click(
-        fn=force_complete_project_refresh,
-        inputs=[],
-        outputs=project_dropdown
-    )
-
+    @logged_job("CLEAN")
     def auto_remove_dead_space(project_name: str, silence_threshold: float = -50.0, min_silence_duration: float = 0.5) -> tuple:
         """
         Automatically detect and remove dead space/silence from all audio chunks in a project.
@@ -7280,6 +8330,7 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
             return f"❌ Error processing project: {str(e)}", 0, []
 
 
+    @logged_job("ANALYZE")
     def analyze_project_audio_quality(project_name: str) -> tuple:
         """
         Analyze audio quality metrics for all chunks in a project.
@@ -7382,13 +8433,6 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
     # Load projects on tab initialization  
     demo.load(
         fn=force_refresh_single_project_dropdown,
-        inputs=[],
-        outputs=project_dropdown
-    )
-    
-    # Refresh projects dropdown
-    refresh_projects_btn.click(
-        fn=force_complete_project_refresh,
         inputs=[],
         outputs=project_dropdown
     )
@@ -7506,26 +8550,26 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
     # Volume normalization event handlers
     volume_preset_dropdown.change(
         fn=apply_volume_preset,
-        inputs=[volume_preset_dropdown, target_volume_level],
-        outputs=[target_volume_level, volume_status]
+        inputs=[volume_preset_dropdown, vl_target_volume_level],
+        outputs=[vl_target_volume_level, vl_volume_status]
     )
     
     enable_voice_normalization.change(
         fn=get_volume_normalization_status,
-        inputs=[enable_voice_normalization, target_volume_level, voice_audio],
-        outputs=volume_status
+        inputs=[enable_voice_normalization, vl_target_volume_level, voice_audio],
+        outputs=vl_volume_status
     )
     
-    target_volume_level.change(
+    vl_target_volume_level.change(
         fn=get_volume_normalization_status,
-        inputs=[enable_voice_normalization, target_volume_level, voice_audio],
-        outputs=volume_status
+        inputs=[enable_voice_normalization, vl_target_volume_level, voice_audio],
+        outputs=vl_volume_status
     )
     
     voice_audio.change(
         fn=get_volume_normalization_status,
-        inputs=[enable_voice_normalization, target_volume_level, voice_audio],
-        outputs=volume_status
+        inputs=[enable_voice_normalization, vl_target_volume_level, voice_audio],
+        outputs=vl_volume_status
     )
     
     # Volume preset handlers for single-voice audiobook
@@ -7557,7 +8601,55 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
     # Enhanced Validation with project name
 
 if __name__ == "__main__":
+    def _get_lan_ip():
+        import socket
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+        except Exception:
+            return None
+
+    def _get_free_port(preferred=7860):
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            s.bind(("0.0.0.0", preferred))
+            s.close()
+            return preferred
+        except OSError:
+            s.close()
+            s2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s2.bind(("0.0.0.0", 0))
+            port = s2.getsockname()[1]
+            s2.close()
+            return port
+
+    def _print_lan_access(port):
+        lan_ip = _get_lan_ip()
+        if not lan_ip:
+            print("📱 Phone access: could not determine local IP.")
+            return
+        url = f"http://{lan_ip}:{port}"
+        print("")
+        print("📱 On your phone (same WiFi) open this link or scan the QR:")
+        print(f"   {url}")
+        try:
+            import qrcode
+            qr = qrcode.QRCode(border=2)
+            qr.add_data(url)
+            qr.make(fit=True)
+            qr.print_ascii()
+        except Exception as e:
+            print(f"   (QR code unavailable: {e})")
+        print("")
+
+    _PORT = _get_free_port(7860)
+    _print_lan_access(_PORT)
+    print(f"[STARTUP] App ready in {time.time()-_APP_T0:.1f}s from first import. Starting server...", flush=True)
     demo.queue(
         max_size=50,
         default_concurrency_limit=1,
-    ).launch(share=True)
+    ).launch(share=False, server_name="0.0.0.0", server_port=_PORT)

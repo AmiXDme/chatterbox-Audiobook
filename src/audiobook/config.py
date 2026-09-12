@@ -6,6 +6,7 @@ Handles loading and saving of application configuration including voice library 
 
 import json
 import os
+from datetime import datetime
 from pathlib import Path
 
 
@@ -41,7 +42,7 @@ def save_config(voice_library_path: str) -> str:
     """
     config = {
         'voice_library_path': voice_library_path,
-        'last_updated': str(Path().resolve())  # timestamp
+        'last_updated': datetime.now().isoformat()
     }
     try:
         with open(CONFIG_FILE, 'w') as f:

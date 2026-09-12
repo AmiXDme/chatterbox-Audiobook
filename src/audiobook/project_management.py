@@ -8,12 +8,13 @@ import os
 import json
 import shutil
 import time
+import numpy as np
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional, Any
 from datetime import datetime
 
-from .text_processing import chunk_text_by_sentences, parse_multi_voice_text, chunk_multi_voice_segments
-from .audio_processing import save_audio_chunks, auto_remove_silence, normalize_audio_levels, analyze_audio_quality
+from .processing import chunk_text_by_sentences, parse_multi_voice_text, chunk_multi_voice_segments, save_audio_chunks
+from .audio_processing import auto_remove_silence, normalize_audio_levels, analyze_audio_quality
 from .voice_management import load_voice_for_tts, get_voice_config
 from .models import generate_with_retry, load_model_cpu
 
@@ -264,6 +265,7 @@ def create_audiobook(
     # Generate audio for chunks
     audio_chunks = []
     generated_files = []
+    global_chunk_counter = 0
     
     try:
         for i, chunk in enumerate(chunks):
@@ -284,11 +286,12 @@ def create_audiobook(
             
             # Auto-save periodically
             if (i + 1) % autosave_interval == 0 or i == len(chunks) - 1:
-                # Save current batch
-                batch_files = save_audio_chunks(
-                    audio_chunks, model.sr, safe_project_name, "audiobook_projects"
+                batch_files, _ = save_audio_chunks(
+                    audio_chunks, model.sr, safe_project_name, "audiobook_projects",
+                    start_index=global_chunk_counter + 1
                 )
                 generated_files.extend(batch_files)
+                global_chunk_counter += len(audio_chunks)
                 audio_chunks = []  # Reset for next batch
         
         # Update metadata to completed
@@ -353,6 +356,7 @@ def create_multi_voice_audiobook_with_assignments(
     # Generate audio for segments
     audio_chunks = []
     generated_files = []
+    global_chunk_counter = 0
     
     try:
         for i, segment in enumerate(chunked_segments):
@@ -392,11 +396,12 @@ def create_multi_voice_audiobook_with_assignments(
             
             # Auto-save periodically
             if (i + 1) % autosave_interval == 0 or i == len(chunked_segments) - 1:
-                # Save current batch
-                batch_files = save_audio_chunks(
-                    audio_chunks, model.sr, safe_project_name, "audiobook_projects"
+                batch_files, _ = save_audio_chunks(
+                    audio_chunks, model.sr, safe_project_name, "audiobook_projects",
+                    start_index=global_chunk_counter + 1
                 )
                 generated_files.extend(batch_files)
+                global_chunk_counter += len(audio_chunks)
                 audio_chunks = []  # Reset for next batch
         
         # Update metadata to completed

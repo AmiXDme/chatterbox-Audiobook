@@ -22,6 +22,11 @@ from .inference.alignment_stream_analyzer import AlignmentStreamAnalyzer
 logger = logging.getLogger(__name__)
 
 
+# Live inference progress shared with the app layer (read by the terminal
+# heartbeat — no circular import since the app imports this module, not vice versa).
+T3_PROGRESS = {"tokens": 0, "t0": 0.0, "est": 0, "active": False}
+
+
 class AttrDict(dict):
     def __init__(self, *args, **kwargs):
         super(AttrDict, self).__init__(*args, **kwargs)
@@ -321,6 +326,10 @@ class T3(nn.Module):
         )
         # Initialize kv_cache with the full context.
         past = output.past_key_values
+        import time as _tt
+        _t3_t0 = _tt.time()
+        T3_PROGRESS.update({"tokens": 0, "t0": _t3_t0, "active": True})
+        print(f"🧠 [T3] Context encoded — starting AR loop (max {max_new_tokens} tokens)...", flush=True)
 
         # ---- Generation Loop using kv_cache ----
         for i in tqdm(range(max_new_tokens), desc="Sampling", dynamic_ncols=True):
@@ -352,6 +361,11 @@ class T3(nn.Module):
             if next_token.view(-1) == self.hp.stop_speech_token:
                 break
 
+            if (i + 1) % 100 == 0:
+                _el = _tt.time() - _t3_t0
+                T3_PROGRESS["tokens"] = i + 1
+                print(f"🧠 [T3] {i+1} tokens in {_el:.1f}s ({(i+1)/max(_el,1e-3):.1f} tok/s)...", flush=True)
+
             # Get embedding for the new token.
             next_token_embed = self.speech_emb(next_token)
             next_token_embed = next_token_embed + self.speech_pos_emb.get_fixed_embedding(i + 1)
@@ -372,4 +386,5 @@ class T3(nn.Module):
 
         # Concatenate all predicted tokens along the sequence dimension.
         predicted_tokens = torch.cat(predicted, dim=1)  # shape: (B, num_tokens)
+        T3_PROGRESS.update({"tokens": int(predicted_tokens.shape[-1]), "active": False})
         return predicted_tokens

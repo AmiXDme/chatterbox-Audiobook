@@ -278,8 +278,11 @@ class MTLTokenizer:
         return preprocessed_text
 
     def text_to_tokens(self, text: str, language_id: str = None, lowercase: bool = True, nfkd_normalize: bool = True):
+        import time as _tt
+        _z0 = _tt.time()
         text_tokens = self.encode(text, language_id=language_id, lowercase=lowercase, nfkd_normalize=nfkd_normalize)
         text_tokens = torch.IntTensor(text_tokens).unsqueeze(0)
+        print(f"🔤 [tokenizer:{language_id or 'en'}] {len(text)} chars -> {len(text_tokens[0])} tokens in {_tt.time()-_z0:.1f}s", flush=True)
         return text_tokens
 
     def encode(self, txt: str, language_id: str = None, lowercase: bool = True, nfkd_normalize: bool = True):

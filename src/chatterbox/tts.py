@@ -12,6 +12,7 @@ from safetensors.torch import load_file
 _model_lock = threading.Lock()
 
 from .models.t3 import T3
+from .models.t3.modules.t3_config import T3Config
 from .models.s3tokenizer import S3_SR, drop_invalid_tokens
 from .models.s3gen import S3GEN_SR, S3Gen
 from .models.tokenizers import EnTokenizer
@@ -143,10 +144,14 @@ class ChatterboxTTS:
         )
         ve.to(device).eval()
 
-        t3 = T3()
         t3_state = load_file(ckpt_dir / "t3_cfg.safetensors")
         if "model" in t3_state.keys():
             t3_state = t3_state["model"][0]
+        # Fine-tunes may extend the text vocabulary (e.g. Bangla 704 -> 2530).
+        # Size T3's embedding to the checkpoint instead of the default.
+        _emb = t3_state.get("text_emb.weight", None)
+        _vocab = int(_emb.shape[0]) if _emb is not None else 704
+        t3 = T3(hp=T3Config(text_tokens_dict_size=_vocab))
         t3.load_state_dict(t3_state)
         t3.to(device).eval()
 
@@ -192,24 +197,34 @@ class ChatterboxTTS:
 
             return cls.from_local(_MODELS_DIR, device)
 
+    @torch.inference_mode()
     def prepare_conditionals(self, wav_fpath, exaggeration=0.5):
+        import time as _t
+        _p0 = _t.time()
         ## Load reference wav
         s3gen_ref_wav, _sr = librosa.load(wav_fpath, sr=S3GEN_SR)
 
         ref_16k_wav = librosa.resample(s3gen_ref_wav, orig_sr=S3GEN_SR, target_sr=S3_SR)
+        print(f"🎙️ [TTS] Voice setup: loaded+resampled {len(s3gen_ref_wav)/S3GEN_SR:.1f}s in {_t.time()-_p0:.1f}s", flush=True)
 
         s3gen_ref_wav = s3gen_ref_wav[:self.DEC_COND_LEN]
+        _e0 = _t.time()
         s3gen_ref_dict = self.s3gen.embed_ref(s3gen_ref_wav, S3GEN_SR, device=self.device)
+        print(f"🎙️ [TTS] Voice setup: S3Gen embedding in {_t.time()-_e0:.1f}s", flush=True)
 
         # Speech cond prompt tokens
         if plen := self.t3.hp.speech_cond_prompt_len:
+            _k0 = _t.time()
             s3_tokzr = self.s3gen.tokenizer
             t3_cond_prompt_tokens, _ = s3_tokzr.forward([ref_16k_wav[:self.ENC_COND_LEN]], max_len=plen)
             t3_cond_prompt_tokens = torch.atleast_2d(t3_cond_prompt_tokens).to(self.device)
+            print(f"🎙️ [TTS] Voice setup: prompt tokens in {_t.time()-_k0:.1f}s", flush=True)
 
         # Voice-encoder speaker embedding
+        _v0 = _t.time()
         ve_embed = torch.from_numpy(self.ve.embeds_from_wavs([ref_16k_wav], sample_rate=S3_SR))
         ve_embed = ve_embed.mean(axis=0, keepdim=True).to(self.device)
+        print(f"🎙️ [TTS] Voice setup: speaker embedding in {_t.time()-_v0:.1f}s (total {_t.time()-_p0:.1f}s)", flush=True)
 
         t3_cond = T3Cond(
             speaker_emb=ve_embed,
@@ -243,8 +258,9 @@ class ChatterboxTTS:
         text = punc_norm(text)
         text_tokens = self.tokenizer.text_to_tokens(text).to(self.device)
 
-        if cfg_weight > 0.0:
-            text_tokens = torch.cat([text_tokens, text_tokens], dim=0)  # Need two seqs for CFG
+        # NOTE: must always duplicate even when cfg_weight==0 — T3 hard-indexes
+        # batch[1] for the CFG unconditional branch (text_emb[1].zero_()).
+        text_tokens = torch.cat([text_tokens, text_tokens], dim=0)  # Need two seqs for CFG
 
         sot = self.t3.hp.start_text_token
         eot = self.t3.hp.stop_text_token
@@ -252,6 +268,9 @@ class ChatterboxTTS:
         text_tokens = F.pad(text_tokens, (0, 1), value=eot)
 
         with torch.inference_mode():
+            import time as _pt
+            print("🔤 [TTS] Tokenizing text...", flush=True)
+            _a0 = _pt.time()
             speech_tokens = self.t3.inference(
                 t3_cond=conds.t3,
                 text_tokens=text_tokens,
@@ -262,6 +281,7 @@ class ChatterboxTTS:
                 min_p=min_p,
                 top_p=top_p,
             )
+            _t3_dur = _pt.time() - _a0
             # Extract only the conditional batch.
             speech_tokens = speech_tokens[0]
 
@@ -270,10 +290,16 @@ class ChatterboxTTS:
             speech_tokens = speech_tokens[speech_tokens < 6561]
 
             speech_tokens = speech_tokens.to(self.device)
+            _n_tok = int(speech_tokens.shape[-1])
+            _tps = _n_tok / _t3_dur if _t3_dur > 0 else 0
+            print(f"🧠 [TTS] T3 done: {_n_tok} speech tokens in {_t3_dur:.1f}s ({_tps:.1f} tok/s)", flush=True)
 
+            print(f"🎻 [TTS] Decoding {_n_tok} speech tokens with S3Gen...", flush=True)
+            _b0 = _pt.time()
             wav, _ = self.s3gen.inference(
                 speech_tokens=speech_tokens,
                 ref_dict=conds.gen,
             )
+            print(f"🔊 [TTS] S3Gen done in {_pt.time()-_b0:.1f}s", flush=True)
             wav = wav.squeeze(0).detach().cpu().numpy()
         return torch.from_numpy(wav).unsqueeze(0)
