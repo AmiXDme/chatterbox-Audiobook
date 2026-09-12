@@ -68,7 +68,7 @@ Outside the folder, only two normal things: the `python3.12-venv` system package
 ### ⚡ Realtime Generation Engine (single-voice, multi-voice AND voice conversion)
 - **Live streaming UI** — partial audio, status, and timing refresh after every chunk (generator yields, original styling kept)
 - **Timing panel** — start stamp, elapsed, ETA, projected end clock time (`ends ~14:35:10`)
-- **Terminal heartbeat** — timestamped tick every 5 s (chunk X/Y, elapsed, ETA, tokens, **RAM MB**); pause-aware; job-id guarded; 30-min stale-thread guard
+- **Terminal heartbeat** — timestamped tick every 5 s (chunk X/Y, elapsed, ETA, tokens, **RAM MB**); pause-aware; job-id guarded; 30-min stale-thread guard; **token-aware live ETA** (T3 loop streams counts, so single-segment jobs show `tok 100/172 (2.5/s) ETA 29s` instead of a stuck `ETA 0s`); **⚠️ slow-chunk watchdog** (a chunk past 3× average is announced as slow-not-stuck)
 - **🛑 Cancel** — stops after the current chunk, partial result kept (audiobooks can be resumed later)
 - **⏸️ Pause / ▶️ Resume** (TTS tabs) — gate checked before every chunk, button label toggles live
 - **Skip-and-continue** — a failed chunk is recorded and skipped instead of killing a hours-long run; failures listed at the end
@@ -79,6 +79,10 @@ Outside the folder, only two normal things: the `python3.12-venv` system package
 - **Job framing everywhere** — `@logged_job` start/finish/duration on batch, legacy-audiobook, WAV-combine, regen, clean, analyze (nothing runs silent)
 - **Unbuffered output** — all launchers run `python3 -u`, so every line appears instantly
 - **Startup breadcrumbs** — torch/gradio/stack/UI-build/model-weight progress markers so cold starts never look dead
+- **🔊 ASCII waveforms** — every finished job prints its sound-shape in the terminal (flat line = silent failure spotted without a player; solid wall = clipping) plus a **completion bell** for long runs
+- **🐌 Slowest-chunk leaderboard** — each finale lists the top-5 slowest chunks with word counts, so problem text can be found and shortened
+- **💾 Disk-space guard** — audiobook/VC jobs warn when free disk drops under 2 GB, before a mid-book write fails
+- **Strict one-model-at-a-time** — EN runs only multilingual, BN runs only Bangla; switching evicts the other (cache cleared, RAM trimmed, UI state synced, logged as `[MEM] Evicted …`); multi-voice finale reports conditioning cache hits/misses
 
 ### 🔄 Voice Conversion Studio
 - Any-length source audio → auto-split into **30 s chunks** → converted → stitched with 10 ms edge fades (no clicks)
@@ -143,6 +147,7 @@ Longer reference files don't crash — but extra audio is ignored (TTS/VC-target
 | HF Hub `unauthenticated requests` warning | No token set | Harmless; rate limits only matter for huge downloads |
 | `.sh` double-click opens editor (Sigma) | Sigma never passes filenames to handlers (verified) | Use Mint menu entry, or right-click → Open in Terminal |
 | First Bengali use downloads ~2 GB slowly | Expected one-time `models-bangla/` fetch | Watch `[BN]` lines; afterwards instant via singleton |
+| No completion bell sound | Terminal bell depends on your terminal's settings | GNOME Terminal: Preferences → Sound → enable terminal bell (or watch for `[WAVEFORM]` + `📊 [SESSION]` lines instead) |
 | `Cangjie5_TC.json` re-downloads each launch | Tokenizer cache miss (~2 MB) | Harmless, ignore |
 
 ---
@@ -199,6 +204,14 @@ In: `.txt/.md`, voice samples `.wav/.mp3/.flac`. Out: 16-bit mono `.wav` chunks 
 **Bengali support (BosonLab analysis):** stock 23-language model lacks Bengali → integrated `BosonLab/chatterbox-bangla` (MIT, ~99 h, vocab 2530) as 24th language. `tts.py from_local` auto-sizes T3 to checkpoint vocab; new `src/audiobook/bangla.py` (`BanglaTTS` adapter + lazy singleton loader into `models-bangla/` + graceful fallback); `bn` routed in TTS/single/multi/regen/legacy paths; `punc_norm` accepts `।`; `bn` in all language dropdowns.
 
 **On-demand models (user idea):** removed `demo.load` model preload — UI opens model-free, `load_model(language_id)` lazy-loads multilingual-or-Bangla on first use; all 6 `from_pretrained` fallbacks routed through the singleton (fixes double-load race where a click during preload loaded weights twice).
+
+**Per-language sample texts:** `DEFAULT_TEXTS` map (all 24 languages) auto-fills TTS/single/multi textboxes on language switch — only when empty or holding a previous sample, never overwriting typed text.
+
+**ETA + surprise round:** token-aware heartbeat ETA (shared `T3_PROGRESS`, dual module-tree safe after finding editable-install vs local-import dict split); slow-chunk watchdog; conds-cache hit/miss scoreboard; ASCII waveforms on all 6 finales; completion bell; `_copy_ref_audio` sizes; app-ready startup timer.
+
+**Surprise round 2:** slowest-chunks leaderboard on every finale (top-5 with word counts — find problem text fast); pre-job disk-space guard (warns under 2 GB free before a mid-book write fails).
+
+**Exclusive one-model mode (user idea):** EN↔BN switching evicts the inactive weights (`[MEM] Evicted …`, gc + malloc_trim, UI state synced — verified settable server-side); one model resident ever; alternating reloads per switch, sticking never reloads.
 
 ---
 

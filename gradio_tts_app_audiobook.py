@@ -357,6 +357,25 @@ def _rss_mb():
 
 _SESSION = {"audio_s": 0.0, "wall_s": 0.0, "jobs": 0}
 
+def _disk_warn(path, label):
+    """Warn if free disk under 2GB before a big job. Returns free GB or -1."""
+    try:
+        import shutil as _sh
+        free = _sh.disk_usage(path).free / 1e9
+        if free < 2.0:
+            print(f"⚠️ [{label}] Low disk: {free:.1f}GB free at {path} — job may fail mid-write", flush=True)
+        return free
+    except Exception:
+        return -1.0
+
+def _print_slowest(slow_log, total_chunks):
+    """Print the top-5 slowest chunks so problem text can be found and fixed."""
+    if not slow_log:
+        return
+    top = sorted(slow_log, reverse=True)[:5]
+    print("🐌 Slowest chunks (of %d): %s" % (
+        total_chunks, "; ".join("%s %.0fs" % (lbl, s) for s, lbl in top)), flush=True)
+
 def _waveform_ascii(audio_np, width=64, height=8):
     """Render mono audio as a small ASCII waveform block. Pure numpy, no deps."""
     try:
@@ -634,6 +653,8 @@ def vc_convert_chunked(vc_model, source_audio, target_voice_path, chunk_seconds=
     done_chunks = 0
     cancelled = False
     last_ends_at = "—"
+    slow_log = []
+    _disk_warn(out_dir, "VC")
 
     # Start realtime terminal heartbeat
     VC_LIVE.update({"running": True, "stop": False, "t_start": t_start, "beat": t_start,
@@ -700,6 +721,7 @@ def vc_convert_chunked(vc_model, source_audio, target_voice_path, chunk_seconds=
             total_tokens += est_tokens
 
             c_elapsed = time.time() - c_start
+            slow_log.append((c_elapsed, f"chunk {idx+1} (~{est_tokens} tok)"))
             elapsed = time.time() - t_start
             avg = elapsed / done_chunks
             eta = avg * (total_chunks - idx - 1)
@@ -758,6 +780,7 @@ def vc_convert_chunked(vc_model, source_audio, target_voice_path, chunk_seconds=
         timing += "</div>"
         yield (sr_out, final_np), status, timing, chunk_files, source_audio
         print(f"[WAVEFORM] {final_dur:.1f}s:\n{_waveform_ascii(final_np)}", flush=True)
+        _print_slowest(slow_log, total_chunks)
         _session_add("VC", final_dur, total_elapsed)
     finally:
         VC_LIVE["stop"] = True
@@ -795,6 +818,7 @@ def generate(model, text, audio_prompt_path, exaggeration, temperature, seed_num
     threading.Thread(target=_tts_heartbeat, daemon=True).start()
     print(f"[TTS QUICK {time.strftime('%H:%M:%S')}] Job started — {len(segments)} segment(s), RAM {_rss_mb():.0f}MB", flush=True)
     seg_times = []
+    slow_log = []
     def _qstop():
         TTS_LIVE["stop"] = True
         TTS_LIVE["running"] = False
@@ -860,6 +884,7 @@ def generate(model, text, audio_prompt_path, exaggeration, temperature, seed_num
                 audio_segments.append(audio_np)
                 seg_dur = _time.time() - _t0
                 seg_times.append(seg_dur)
+                slow_log.append((seg_dur, f"seg {done_n} ({len(text_segment.split())}w)"))
                 seg_audio = len(audio_np) / sample_rate
                 rtf = seg_audio / seg_dur if seg_dur > 0 else 0
                 done_n = len(seg_times)
@@ -884,7 +909,9 @@ def generate(model, text, audio_prompt_path, exaggeration, temperature, seed_num
         _qa = len(final_audio) / sample_rate if sample_rate else 0
         _qw = time.time() - q_start
         print(f"[TTS QUICK {time.strftime('%H:%M:%S')}] Job done: {_qa:.1f}s audio in {_qw:.1f}s ({_qa/_qw if _qw > 0 else 0:.2f}× realtime) | RAM {_rss_mb():.0f}MB", flush=True)
+        _print_slowest(slow_log, len(segments))
         print(f"[WAVEFORM] {_qa:.1f}s:\n{_waveform_ascii(final_audio)}", flush=True)
+        _print_slowest(slow_log, len(segments))
         _session_add("TTS QUICK", _qa, _qw)
         return (sample_rate, final_audio)
     else:
@@ -2465,6 +2492,8 @@ def create_multi_voice_audiobook_with_assignments(
     conds_cache = {}
     conds_hits = 0
     conds_miss = 0
+    slow_log = []
+    _disk_warn(project_dir, "TTS MULTI")
 
     def tlog(msg):
         print(f"[TTS MULTI {time.strftime('%H:%M:%S')}] {msg}", flush=True)
@@ -2610,6 +2639,7 @@ def create_multi_voice_audiobook_with_assignments(
 
             done_new += 1
             c_elapsed = time.time() - c_start
+            slow_log.append((c_elapsed, f"chunk {i+1} [{voice_name}] ({len(chunk_text.split())}w)"))
             elapsed = time.time() - t_start
             avg = elapsed / done_new
             eta = avg * (total_chunks - (i + 1))
@@ -2696,6 +2726,7 @@ def create_multi_voice_audiobook_with_assignments(
     yield ((processing_model.sr, combined_audio), success_msg, final_timing, "",
            gr.update(value="⏸️ Pause"))
     print(f"[WAVEFORM] {len(combined_audio)/(processing_model.sr or 24000):.1f}s:\n{_waveform_ascii(combined_audio)}", flush=True)
+    _print_slowest(slow_log, total_chunks)
     _session_add("TTS MULTI", len(combined_audio) / (processing_model.sr or 24000), total_elapsed)
 
 def handle_multi_voice_analysis(text_content, voice_library_path):
@@ -5244,6 +5275,8 @@ def create_audiobook_with_original_voice_metadata(
     cancelled = False
     done_new = 0
     last_ends_at = "—"
+    slow_log = []
+    _disk_warn(project_dir, "TTS SINGLE")
 
     def tlog(msg):
         print(f"[TTS SINGLE {time.strftime('%H:%M:%S')}] {msg}", flush=True)
@@ -5367,6 +5400,7 @@ def create_audiobook_with_original_voice_metadata(
 
             done_new += 1
             c_elapsed = time.time() - c_start
+            slow_log.append((c_elapsed, f"chunk {chunk_num} ({len(chunk_text.split())}w)"))
             elapsed = time.time() - t_start
             avg = elapsed / done_new
             eta = avg * (len(chunks_to_process) - (i + 1))
@@ -5488,6 +5522,7 @@ def create_audiobook_with_original_voice_metadata(
            final_timing, "", gr.update(value="⏸️ Pause"))
     _ssr = (getattr(model, "sr", 24000) if model else 24000) or 24000
     print(f"[WAVEFORM] {len(combined_audio)/_ssr:.1f}s:\n{_waveform_ascii(combined_audio)}", flush=True)
+    _print_slowest(slow_log, len(chunks_to_process))
     _session_add("TTS SINGLE", len(combined_audio) / _ssr, total_elapsed)
 
 def create_audiobook_with_volume_settings(model, text_content, voice_library_path, selected_voice, project_name, 
