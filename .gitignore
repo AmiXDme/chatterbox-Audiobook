@@ -116,6 +116,8 @@ checkpoints/
 /models-bangla/
 vc_output/
 _working_audio/
+downloads/
+terminal_output/
 .gradio
 
 # Keep the Chatterbox model source code (neural network implementations)

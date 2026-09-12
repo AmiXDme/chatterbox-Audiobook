@@ -88,8 +88,8 @@ Outside the folder, only two normal things: the `python3.12-venv` system package
 - Any-length source audio → auto-split into **30 s chunks** → converted → stitched with 10 ms edge fades (no clicks)
 - Per-chunk retry (2×), per-chunk downloadable files, original-vs-converted A/B players
 
-### ⬇️ Auto-Download (web UI)
-Finished audio downloads itself, like the terminal does — no file hunting. TTS tab, Voice Conversion, and both audiobook tabs each reveal a **⬇️ Download button** with the final file the moment generation completes, and the browser **auto-clicks it** (graceful fallback: if your browser blocks automatic downloads, the visible button is one manual click). Audiobooks combine chunks into one file first; TTS clips save to `terminal_output/`.
+### ⬇️ Downloads (web UI)
+Every finished audio saves itself into the **`downloads/` folder** with a proper filename — no clicks needed to store it: `tts_<voice>_<lang>_<timestamp>.wav`, `<project>_complete.wav` copies, converted VC outputs. Each tab also reveals a **⬇️ Download button** with its file for one-click browser download.
 - Target voice embedded once (first 10 s used); temp files cleaned automatically
 
 ### 🇧🇩 Bengali (Bangla) — 24th Language

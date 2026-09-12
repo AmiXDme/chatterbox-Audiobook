@@ -7528,18 +7528,16 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
     # the visible button is one manual click (still better than hunting files).
     _LAST_VC_FILE = {"path": None}
 
-    def _autodl_js(elem_id):
-        return (
-            "() => {"
-            " setTimeout(() => {"
-            "  try {"
-            f"   const root = document.getElementById('{elem_id}');"
-            "   const a = root ? (root.querySelector('a[download]') || root.querySelector('a')) : null;"
-            "   if (a) { a.click(); }"
-            "  } catch (e) { console.log('auto-download skipped', e); }"
-            " }, 900);"
-            "}"
-        )
+    def _to_downloads(src_path):
+        """Copy a finished file into downloads/ and return the dest path."""
+        d = os.path.join("downloads")
+        os.makedirs(d, exist_ok=True)
+        dest = os.path.join(d, os.path.basename(src_path))
+        if os.path.abspath(src_path) != os.path.abspath(dest):
+            shutil.copy2(src_path, dest)
+            print(f"[DL] Saved to downloads folder: {dest}", flush=True)
+            return dest
+        return src_path
 
     def _write_wav(path, sr, arr):
         import numpy as _np
@@ -7556,15 +7554,17 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
                 wf.setframerate(int(sr))
                 wf.writeframes((a * 32767).astype(_np.int16).tobytes())
 
-    def save_tts_for_download(audio):
+    def save_tts_for_download(audio, voice_name=None, lang=None):
         """TTS tab: (sr, np) preview tuple -> saved wav -> DownloadButton update."""
         try:
             if not audio:
                 return gr.update(value=None, visible=False)
             sr, arr = audio[0], audio[1]
-            d = os.path.join("terminal_output")
+            d = os.path.join("downloads")
             os.makedirs(d, exist_ok=True)
-            path = os.path.join(d, f"tts_{datetime.now():%Y%m%d_%H%M%S}.wav")
+            safe_voice = re.sub(r"[^\w\-]+", "_", str(voice_name or "voice")).strip("_")[:30] or "voice"
+            safe_lang = re.sub(r"[^\w\-]+", "", str(lang or "en"))[:5] or "en"
+            path = os.path.join(d, f"tts_{safe_voice}_{safe_lang}_{datetime.now():%Y%m%d_%H%M%S}.wav")
             _write_wav(path, sr, arr)
             print(f"[DL] TTS audio saved for download: {path}", flush=True)
             return gr.update(value=path, visible=True)
@@ -7577,6 +7577,7 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
             path, _msg = combine_project_audio_chunks(project_name, "wav")
             ok = bool(path and os.path.exists(path))
             if ok:
+                path = _to_downloads(path)
                 print(f"[DL] Audiobook ready for download: {path}", flush=True)
             return gr.update(value=path if ok else None, visible=ok)
         except Exception as e:
@@ -7594,6 +7595,7 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
             p = _LAST_VC_FILE.get("path")
             ok = bool(p and os.path.exists(p))
             if ok:
+                p = _to_downloads(p)
                 print(f"[DL] VC audio ready for download: {p}", flush=True)
             return gr.update(value=p if ok else None, visible=ok)
         except Exception as e:
@@ -7619,9 +7621,7 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
         ],
         outputs=audio_output,
     ).then(
-        save_tts_for_download, inputs=[audio_output], outputs=[tts_download]
-    ).success(
-        lambda: None, inputs=[], outputs=[], js=_autodl_js("dl_tts")
+        save_tts_for_download, inputs=[audio_output, tts_voice_selector, tts_language], outputs=[tts_download]
     )
 
     # Voice Conversion Functions
@@ -7678,8 +7678,6 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
         outputs=[vc_output, vc_status, vc_timing, vc_chunk_files, vc_compare_original]
     ).then(
         vc_download_path, inputs=[], outputs=[vc_download]
-    ).success(
-        lambda: None, inputs=[], outputs=[], js=_autodl_js("dl_vc")
     )
 
     # VC Cancel button — stops after the current chunk (partial result kept)
@@ -7838,8 +7836,6 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
         outputs=[previous_project_dropdown, multi_previous_project_dropdown, project_dropdown]
     ).then(
         single_download_path, inputs=[project_name], outputs=[single_download]
-    ).success(
-        lambda: None, inputs=[], outputs=[], js=_autodl_js("dl_single")
     )
 
     single_cancel_btn.click(
@@ -7883,8 +7879,6 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
         outputs=[previous_project_dropdown, multi_previous_project_dropdown, project_dropdown]
     ).then(
         multi_download_path, inputs=[multi_project_name], outputs=[multi_download]
-    ).success(
-        lambda: None, inputs=[], outputs=[], js=_autodl_js("dl_multi")
     )
 
     multi_cancel_btn.click(
