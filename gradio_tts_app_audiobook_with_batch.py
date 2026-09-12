@@ -117,8 +117,9 @@ def chunk_text_by_sentences(text, max_words=50):
     """
     Split text into chunks, breaking at sentence boundaries after reaching max_words
     """
-    # Split text into sentences using regex to handle multiple punctuation marks
-    sentences = re.split(r'([.!?]+\s*)', text)
+    # Split text into sentences using regex to handle multiple punctuation marks.
+    # Includes the Bengali/Hindi dari (।); harmless for Latin-only text.
+    sentences = re.split(r'([.!?।]+\s*)', text)
     
     chunks = []
     current_chunk = ""

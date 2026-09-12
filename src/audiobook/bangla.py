@@ -31,6 +31,16 @@ try:
 except ImportError:
     HF_HUB_AVAILABLE = False
 
+try:
+    # Shared locale helper (bn/bn-BD/bn_BD -> bn). No cycle: langtext
+    # imports nothing from this module.
+    from src.audiobook.langtext import normalize_locale
+except ImportError:
+    try:
+        from .langtext import normalize_locale
+    except ImportError:
+        normalize_locale = None
+
 
 BANGLA_LANG = "bn"
 BANGLA_REPO_ID = "BosonLab/chatterbox-bangla"
@@ -64,7 +74,15 @@ def evict_bangla_model() -> bool:
 
 
 def is_bangla(language_id) -> bool:
-    """True when the requested language should route to the Bangla model."""
+    """True when the requested language should route to the Bangla model.
+
+    Accepts bn, bn-BD, bn_BD, bn-IN (etc.) — anything else is not Bangla.
+    """
+    if normalize_locale is not None:
+        try:
+            return normalize_locale(language_id) == BANGLA_LANG
+        except Exception:
+            pass
     return (language_id or "").strip().lower() == BANGLA_LANG
 
 

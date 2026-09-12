@@ -8,6 +8,18 @@ import re
 import os
 import wave
 import numpy as np
+
+try:
+    from .langtext import (
+        protect_all, normalize_text, finalize_text, is_voice_tag,
+    )
+except ImportError:  # repo-root on sys.path
+    try:
+        from src.audiobook.langtext import (
+            protect_all, normalize_text, finalize_text, is_voice_tag,
+        )
+    except ImportError:  # langtext unavailable: voice features degrade safely
+        protect_all = normalize_text = finalize_text = is_voice_tag = None
 from pathlib import Path
 from typing import List, Dict, Tuple, Any
 
@@ -22,8 +34,9 @@ def chunk_text_by_sentences(text: str, max_words: int = 50) -> List[str]:
     Returns:
         List of text chunks
     """
-    # Split text into sentences using regex to handle multiple punctuation marks
-    sentences = re.split(r'([.!?]+\s*)', text)
+    # Split text into sentences using regex to handle multiple punctuation marks.
+    # Includes the Bengali/Hindi dari (।); harmless for Latin-only text.
+    sentences = re.split(r'([.!?।]+\s*)', text)
     
     chunks = []
     current_chunk = ""
@@ -36,8 +49,8 @@ def chunk_text_by_sentences(text: str, max_words: int = 50) -> List[str]:
             i += 1
             continue
             
-        # Add punctuation if it exists
-        if i + 1 < len(sentences) and re.match(r'[.!?]+\s*', sentences[i + 1]):
+        # Add punctuation if it exists (dari । reattaches like . ! ?)
+        if i + 1 < len(sentences) and re.match(r'[.!?।]+\s*', sentences[i + 1]):
             sentence += sentences[i + 1]
             i += 2
         else:
@@ -167,7 +180,10 @@ def parse_multi_voice_text(text: str) -> List[Dict[str, str]]:
             continue # Skip empty parts that can result from re.split
             
         part_stripped = part.strip()
-        if re.match(r'^\[[^\]]+\]$', part_stripped): # It's a character tag
+        # A [bracket] span is a character tag only if the name holds a letter;
+        # footnotes like [১]/[2] fall through as ordinary text content.
+        if (re.match(r'^\[[^\]]+\]$', part_stripped)
+                and (is_voice_tag is None or is_voice_tag(part_stripped[1:-1]))):
             if current_character and buffer.strip():
                 segments.append({
                     'character': current_character,
@@ -359,9 +375,14 @@ def _filter_problematic_short_chunks(chunks: List[str], voice_assignments: Dict[
         if len(chunk.strip()) < min_length:
             continue
         
-        # Skip chunks that are just punctuation or whitespace
-        if not re.search(r'[a-zA-Z]', chunk):
-            continue
+        # Skip chunks that are just punctuation or whitespace.
+        # Script-aware: keep any chunk containing letters in ANY script
+        # (Bengali/Devanagari/CJK/…). The old [a-zA-Z] test silently dropped
+        # entire non-Latin books as "punctuation".
+        if not re.search(r'[^\W\d_]', chunk, re.UNICODE):
+            # ...unless it is a speakable digit run (postal codes, years).
+            if not re.search(r'\d', chunk):
+                continue
         
         filtered_chunks.append(chunk)
     
@@ -673,7 +694,8 @@ def chunk_text_by_sentences_local(text, max_words=50):
     """Local copy of sentence chunking to avoid circular imports."""
     
     # Split into sentences using common sentence endings
-    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    # Sentence enders include the Bengali/Hindi dari (।) alongside Latin marks.
+    sentences = re.split(r'(?<=[.!?।])\s+', text.strip())
     
     chunks = []
     current_chunk = ""
@@ -780,13 +802,17 @@ def parse_multi_voice_text_local(text):
     
     return segments
 
-def chunk_multi_voice_text_with_line_break_priority(text: str, max_words: int = 30, pause_duration: float = 0.1) -> tuple:
+def chunk_multi_voice_text_with_line_break_priority(text: str, max_words: int = 30, pause_duration: float = 0.1, language_id: str = "en", natural: bool = False) -> tuple:
     """Chunk multi-voice text with line breaks taking priority over sentence breaks.
     
     Args:
-        text: Input text with voice tags and line breaks
+        text: Input text with voice tags and line breaks (RAW — voice tags are
+            parsed here first; per-voice content is protected/normalized inside
+            process_voice_content_with_line_breaks, then restored before emit)
         max_words: Maximum words per chunk
         pause_duration: Duration per line break in seconds
+        language_id: Locale for per-voice text processing
+        natural: Opt-in spoken expansion (default preserve)
         
     Returns:
         tuple: (segments_with_pauses, total_pause_duration)
@@ -806,8 +832,10 @@ def chunk_multi_voice_text_with_line_break_priority(text: str, max_words: int = 
     while i < len(split_parts):
         part = split_parts[i]
         
-        # Check if this part is a voice tag match
-        if i + 2 < len(split_parts) and re.match(r'\[([^\]]+)\]\s*', part):
+        # A [bracket] span is a voice tag only if the name holds a letter.
+        # Footnotes like [১]/[2] fall through as ordinary narration content.
+        if (i + 2 < len(split_parts) and re.match(r'\[([^\]]+)\]\s*', part)
+                and (is_voice_tag is None or is_voice_tag(split_parts[i + 1]))):
             # This is a voice tag, extract the voice name
             current_voice = split_parts[i + 1]  # The captured voice name
             
@@ -817,7 +845,8 @@ def chunk_multi_voice_text_with_line_break_priority(text: str, max_words: int = 
             # Process the content with line break awareness
             if content_part:
                 processed_segments = process_voice_content_with_line_breaks(
-                    current_voice, content_part, max_words, pause_duration
+                    current_voice, content_part, max_words, pause_duration,
+                    language_id=language_id, natural=natural
                 )
                 
                 for segment in processed_segments:
@@ -830,7 +859,8 @@ def chunk_multi_voice_text_with_line_break_priority(text: str, max_words: int = 
             if current_voice and part.strip():
                 # Content continuation for current voice
                 processed_segments = process_voice_content_with_line_breaks(
-                    current_voice, part, max_words, pause_duration
+                    current_voice, part, max_words, pause_duration,
+                    language_id=language_id, natural=natural
                 )
                 
                 for segment in processed_segments:
@@ -839,7 +869,8 @@ def chunk_multi_voice_text_with_line_break_priority(text: str, max_words: int = 
             elif not current_voice and part.strip():
                 # Content before any voice tag - treat as narrator
                 processed_segments = process_voice_content_with_line_breaks(
-                    "Narrator", part, max_words, pause_duration
+                    "Narrator", part, max_words, pause_duration,
+                    language_id=language_id, natural=natural
                 )
                 
                 for segment in processed_segments:
@@ -851,10 +882,21 @@ def chunk_multi_voice_text_with_line_break_priority(text: str, max_words: int = 
     return segments_with_pauses, total_pause_duration
 
 
-def process_voice_content_with_line_breaks(voice_name: str, content: str, max_words: int, pause_duration: float) -> list:
-    """Process voice content while preserving line breaks for pauses."""
+def process_voice_content_with_line_breaks(voice_name: str, content: str, max_words: int, pause_duration: float, language_id: str = "en", natural: bool = False) -> list:
+    """Process voice content while preserving line breaks for pauses.
+
+    Per-voice content is protected + normalized here (tags were already split
+    on RAW text above), and each emitted chunk is restored + leak-asserted,
+    so placeholders never leave this function.
+    """
     segments = []
-    
+
+    # Protect + normalize this voice block (pauses use raw \n, counted below).
+    _pctx = None
+    if protect_all is not None:
+        content, _pctx = protect_all(content, language_id, natural=natural)
+        content = normalize_text(content, language_id, symbols=not natural)
+
     # Split content by line breaks, keeping the line breaks
     line_segments = re.split(r'(\n+)', content)
     
@@ -882,9 +924,12 @@ def process_voice_content_with_line_breaks(voice_name: str, content: str, max_wo
         # Apply sentence chunking to this segment
         text_chunks = chunk_text_by_sentences_local(text_content, max_words)
         
-        # Add these chunks with voice assignment and initial pause duration of 0
+        # Add these chunks with voice assignment and initial pause duration of 0.
+        # Restored + leak-asserted: no placeholder ever leaves this function.
         for chunk in text_chunks:
             if chunk.strip():
+                if finalize_text is not None and _pctx is not None:
+                    chunk = finalize_text(chunk, _pctx, where="multi-chunk")
                 segments.append({
                     'voice': voice_name,
                     'text': chunk.strip(),

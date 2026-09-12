@@ -659,6 +659,7 @@ def vc_convert_chunked(vc_model, source_audio, target_voice_path, chunk_seconds=
     # Start realtime terminal heartbeat
     VC_LIVE.update({"running": True, "stop": False, "t_start": t_start, "beat": t_start,
                     "chunk": 0, "total": total_chunks, "eta": 0.0, "ends_at": "—",
+                    "suspect": 0,
                     "job": VC_LIVE.get("job", 0) + 1})
     threading.Thread(target=_vc_heartbeat, daemon=True).start()
 
@@ -770,6 +771,12 @@ def vc_convert_chunked(vc_model, source_audio, target_voice_path, chunk_seconds=
                       f"({final_dur:.1f}s). Failed chunks skipped: {failed_chunks}")
         else:
             status = f"✅ Voice conversion complete! {done_chunks}/{total_chunks} chunks ({final_dur:.1f}s)"
+        # Coverage guard for VC: output should roughly match input length.
+        if not cancelled and total_dur > 0 and final_dur < 0.7 * total_dur:
+            VC_LIVE["suspect"] = VC_LIVE.get("suspect", 0) + 1
+            status += (f"\n⚠️ Output ({final_dur:.1f}s) much shorter than source "
+                       f"({total_dur:.1f}s) — possible missing audio, check chunks.")
+            print(f"⚠️ [VC] Coverage warning: {final_dur:.1f}s out vs {total_dur:.1f}s in", flush=True)
         tlog(f"FINISHED at {end_stamp} | total {total_elapsed:.1f}s | ~{total_tokens} tokens | output: {final_path}")
 
         timing = (f"<div class='voice-status'>⏱️ Started <b>{start_stamp}</b> • ended <b>{end_stamp}</b> • "
@@ -786,7 +793,63 @@ def vc_convert_chunked(vc_model, source_audio, target_voice_path, chunk_seconds=
         VC_LIVE["stop"] = True
         VC_LIVE["running"] = False
 
-def generate(model, text, audio_prompt_path, exaggeration, temperature, seed_num, cfgw, min_p=0.05, top_p=1.0, repetition_penalty=1.2,     language_id="en", progress=gr.Progress(track_tqdm=True)):
+def _coverage_ok(label, n_chars, audio_sec, state=None, tag=""):
+    """Coverage guard: flag outputs suspiciously short for their input.
+
+    Catches silent truncation (output cap, early EOS stop) that would
+    otherwise surface as 'missing words'. Conservative floor: >=1s of
+    audio per 40 input chars. Counts suspects in state["suspect"].
+    Never raises, never blocks.
+    """
+    try:
+        if not n_chars or not audio_sec:
+            return True
+        expected_min = n_chars / 40.0
+        if audio_sec < expected_min:
+            if isinstance(state, dict):
+                state["suspect"] = state.get("suspect", 0) + 1
+            print(f"⚠️ [{label}] Coverage warning{tag}: {n_chars} chars -> only "
+                  f"{audio_sec:.1f}s audio (expected >={expected_min:.1f}s). "
+                  f"Possible truncation/EOS cut — check this chunk.", flush=True)
+            return False
+        return True
+    except Exception:
+        return True
+
+def _find_unk_words(model, text, language_id="en"):
+    """Scan input for words containing out-of-vocabulary characters.
+
+    Such words become [UNK] tokens that the model skips or garbles — the
+    classic 'missing words' cause that isn't truncation. Returns the list
+    of suspicious words (may be empty). Never raises.
+    """
+    try:
+        tok = getattr(model, "tokenizer", None)
+        if tok is None or not text:
+            return []
+        vocab = tok.tokenizer.get_vocab() if hasattr(tok, "tokenizer") else {}
+        unk_id = vocab.get("[UNK]")
+        if unk_id is None:
+            return []
+        bad = []
+        for w in text.split():
+            try:
+                try:
+                    ids = tok.encode(w, language_id=language_id)
+                except TypeError:
+                    ids = tok.encode(w)
+            except Exception:
+                continue
+            ids = list(ids[0]) if hasattr(ids, "dim") else list(ids)
+            if any(int(i) == unk_id for i in ids):
+                bad.append(w)
+                if len(bad) >= 10:
+                    break
+        return bad
+    except Exception:
+        return []
+
+def generate(model, text, audio_prompt_path, exaggeration, temperature, seed_num, cfgw, min_p=0.05, top_p=1.0, repetition_penalty=1.2, language_id="en", progress=gr.Progress(track_tqdm=True)):
     if model is None:
         model = load_model(language_id)  # singleton: dedupes concurrent loads, never double-loads
 
@@ -799,6 +862,13 @@ def generate(model, text, audio_prompt_path, exaggeration, temperature, seed_num
     # Bengali routes to the Bangla fine-tune singleton (rest stays multilingual)
     model = _resolve_model_for_language(model, language_id)
 
+    # Warn about out-of-vocabulary words (checked against the RESOLVED model's
+    # vocab): they become [UNK] tokens the model skips or garbles.
+    _unk = _find_unk_words(model, text, language_id)
+    if _unk:
+        print(f"⚠️ [TTS] {len(_unk)} word(s) contain characters outside the voice vocabulary "
+              f"and may be skipped/garbled: {', '.join(_unk[:10])}", flush=True)
+
     if seed_num != 0:
         set_seed(int(seed_num))
 
@@ -808,12 +878,23 @@ def generate(model, text, audio_prompt_path, exaggeration, temperature, seed_num
 
     # Split text on line breaks to insert pauses between segments
     segments = re.split(r'(\n+)', text)
+    # Anti-truncation: a single model call caps output (~40 s audio), so long
+    # text segments are pre-split into sentence groups. Without this, the tail
+    # of a long paragraph is silently cut off ("missing words").
+    _split_segs = []
+    for _s in segments:
+        if _s and '\n' not in _s and len(_s.split()) > 50:
+            _split_segs.extend(chunk_text_by_sentences(_s, 50))
+        else:
+            _split_segs.append(_s)
+    segments = _split_segs
     audio_segments = []
     sample_rate = getattr(model, "sr", 24000) if model else 24000
     total_pauses_added = 0
     q_start = time.time()
     TTS_LIVE.update({"running": True, "stop": False, "t_start": q_start, "beat": q_start,
                      "chunk": 0, "total": len(segments), "eta": 0.0, "ends_at": "—",
+                     "suspect": 0,
                      "paused": False, "label": "TTS QUICK", "job": TTS_LIVE.get("job", 0) + 1})
     threading.Thread(target=_tts_heartbeat, daemon=True).start()
     print(f"[TTS QUICK {time.strftime('%H:%M:%S')}] Job started — {len(segments)} segment(s), RAM {_rss_mb():.0f}MB", flush=True)
@@ -893,6 +974,7 @@ def generate(model, text, audio_prompt_path, exaggeration, temperature, seed_num
                 ends_at = (datetime.now() + timedelta(seconds=max(0, eta))).strftime('%H:%M:%S')
                 TTS_LIVE.update({"chunk": seg_i + 1, "beat": _time.time(), "eta": eta, "ends_at": ends_at, "avg": avg})
                 print(f"[TTS QUICK {time.strftime('%H:%M:%S')}] seg {done_n}: {seg_audio:.1f}s audio in {seg_dur:.1f}s ({rtf:.2f}× realtime) | ETA {eta:.0f}s (ends ~{ends_at}) | RAM {_rss_mb():.0f}MB", flush=True)
+                _coverage_ok("TTS QUICK", len(text_segment), seg_audio, TTS_LIVE, tag=f" seg {done_n}")
                 if progress is not None:
                     try:
                         progress((seg_i + 1) / max(len(segments), 1),
@@ -909,6 +991,9 @@ def generate(model, text, audio_prompt_path, exaggeration, temperature, seed_num
         _qa = len(final_audio) / sample_rate if sample_rate else 0
         _qw = time.time() - q_start
         print(f"[TTS QUICK {time.strftime('%H:%M:%S')}] Job done: {_qa:.1f}s audio in {_qw:.1f}s ({_qa/_qw if _qw > 0 else 0:.2f}× realtime) | RAM {_rss_mb():.0f}MB", flush=True)
+        _coverage_ok("TTS QUICK", len(text_content), _qa, TTS_LIVE, tag=" total")
+        if TTS_LIVE.get("suspect"):
+            print(f"[TTS QUICK] ⚠️ {TTS_LIVE['suspect']} segment(s) suspiciously short — check them for missing words.", flush=True)
         _print_slowest(slow_log, len(segments))
         print(f"[WAVEFORM] {_qa:.1f}s:\n{_waveform_ascii(final_audio)}", flush=True)
         _print_slowest(slow_log, len(segments))
@@ -1016,8 +1101,9 @@ def chunk_text_by_sentences(text, max_words=50):
     """
     Split text into chunks, breaking at sentence boundaries after reaching max_words
     """
-    # Split text into sentences using regex to handle multiple punctuation marks
-    sentences = re.split(r'([.!?]+\s*)', text)
+    # Split text into sentences using regex to handle multiple punctuation marks.
+    # Includes the Bengali/Hindi dari (।); harmless for Latin-only text.
+    sentences = re.split(r'([.!?।]+\s*)', text)
     
     chunks = []
     current_chunk = ""
@@ -1030,8 +1116,8 @@ def chunk_text_by_sentences(text, max_words=50):
             i += 1
             continue
             
-        # Add punctuation if it exists
-        if i + 1 < len(sentences) and re.match(r'[.!?]+\s*', sentences[i + 1]):
+        # Add punctuation if it exists (dari । reattaches like . ! ?)
+        if i + 1 < len(sentences) and re.match(r'[.!?।]+\s*', sentences[i + 1]):
             sentence += sentences[i + 1]
             i += 2
         else:
@@ -1425,7 +1511,8 @@ def create_audiobook(
     resume: bool = False,
     autosave_interval: int = 10,
     language_id: str = "en",
-    progress=None
+    progress=None,
+    natural: bool = False
 ) -> tuple:
     """
     Create audiobook from text using selected voice with smart chunking, autosave every N chunks, and resume support.
@@ -1458,9 +1545,20 @@ def create_audiobook(
 
     # Import pause processing functions
     from src.audiobook.processing import chunk_text_with_line_break_priority, create_silence_audio
+    from src.audiobook.langtext import protect_all, normalize_text, finalize_text
+
+    # Staged protection (tags > URLs > emails > numbers > lists > acronyms >
+    # abbreviations), then symbol/whitespace normalization on unprotected text.
+    # English behaves exactly as before (its profile matches legacy rules).
+    text_content, _pctx = protect_all(text_content, language_id, natural=natural)
+    text_content = normalize_text(text_content, language_id, symbols=not natural)
 
     # Chunk text with line breaks taking priority over sentence breaks
     chunks_with_pauses, total_pause_duration = chunk_text_with_line_break_priority(text_content, max_words=50, pause_duration=0.1)
+    
+    # Restore + leak-assert so no placeholder ever reaches TTS/metadata
+    for chunk_data in chunks_with_pauses:
+        chunk_data['text'] = finalize_text(chunk_data['text'], _pctx, where="single-chunk")
     
     # Extract just the text parts for processing
     chunks = [chunk_data['text'] for chunk_data in chunks_with_pauses]
@@ -2349,7 +2447,8 @@ def create_multi_voice_audiobook_with_assignments(
     resume: bool = False,
     autosave_interval: int = 10,
     language_id: str = "en",
-    progress=None
+    progress=None,
+    natural: bool = False
 ) -> tuple:
     """
     Create multi-voice audiobook using the voice assignments mapping, autosave every N chunks, and resume support.
@@ -2384,10 +2483,13 @@ def create_multi_voice_audiobook_with_assignments(
     # Import pause processing functions
     from src.audiobook.processing import chunk_multi_voice_text_with_line_break_priority, create_silence_audio
 
-    # Chunk multi-voice text with line breaks taking priority
+    # RAW text goes in: voice tags are split first inside the chunker, then
+    # each voice block is protected/normalized/restored independently.
+    # (Pre-protecting here would hide [Character] tags from the splitter.)
     initial_max_words = 40
     segments_with_pauses, total_pause_duration = chunk_multi_voice_text_with_line_break_priority(
-        text_content, max_words=initial_max_words, pause_duration=0.1
+        text_content, max_words=initial_max_words, pause_duration=0.1,
+        language_id=language_id, natural=natural
     )
     
     # Add debugging output to see what pause processing found
@@ -2515,6 +2617,7 @@ def create_multi_voice_audiobook_with_assignments(
 
     TTS_LIVE.update({"running": True, "stop": False, "t_start": t_start, "beat": t_start,
                      "chunk": 0, "total": total_chunks, "eta": 0.0, "ends_at": "—",
+                     "suspect": 0,
                      "paused": False, "label": "TTS MULTI", "job": TTS_LIVE.get("job", 0) + 1})
     threading.Thread(target=_tts_heartbeat, daemon=True).start()
     tlog(f"Job started at {start_stamp} — {total_chunks} chunk(s), {len(voice_assignments)} character(s)")
@@ -2652,6 +2755,7 @@ def create_multi_voice_audiobook_with_assignments(
             _rtf = _rtf_dur / c_elapsed if c_elapsed > 0 else 0
             TTS_LIVE["avg"] = avg
             tlog(f"  Chunk {i+1} done in {c_elapsed:.1f}s | elapsed {elapsed:.0f}s | ETA {eta:.0f}s (ends ~{ends_at}) | {_rtf_dur:.1f}s audio ({_rtf:.2f}× realtime)")
+            _coverage_ok("TTS MULTI", len(chunk_text), _rtf_dur, TTS_LIVE, tag=f" chunk {i+1}")
             if progress is not None:
                 try:
                     progress((i + 1) / total_chunks,
@@ -2712,6 +2816,8 @@ def create_multi_voice_audiobook_with_assignments(
                    f" • Avg: {total_elapsed / max(done_new, 1):.1f}s/chunk")
     if cancelled or failed_list:
         timing_info += f" • Last projected end: {last_ends_at}"
+    if TTS_LIVE.get("suspect"):
+        timing_info += f"\n⚠️ {TTS_LIVE['suspect']} chunk(s) suspiciously short — possible missing words, check them"
     success_msg = (f"{head}\n"
                    f"📊 {total_words:,} words in {total_chunks} chunks\n"
                    f"🎭 Characters: {len(voice_assignments)}\n"
@@ -5180,7 +5286,8 @@ def create_audiobook_with_original_voice_metadata(
     resume: bool = False,
     autosave_interval: int = 10,
     language_id: str = "en",
-    progress=None
+    progress=None,
+    natural: bool = False
 ) -> tuple:
     """Create audiobook but save original voice name in metadata (for volume normalization)"""
     # This is a modified version of create_audiobook that preserves the original voice name in metadata
@@ -5241,9 +5348,20 @@ def create_audiobook_with_original_voice_metadata(
     
     # Import pause processing functions
     from src.audiobook.processing import chunk_text_with_line_break_priority, create_silence_audio
+    from src.audiobook.langtext import protect_all, normalize_text, finalize_text
+
+    # Staged protection (tags > URLs > emails > numbers > lists > acronyms >
+    # abbreviations), then symbol/whitespace normalization on unprotected text.
+    # English behaves exactly as before (its profile matches legacy rules).
+    text_content, _pctx = protect_all(text_content, language_id, natural=natural)
+    text_content = normalize_text(text_content, language_id, symbols=not natural)
 
     # Chunk text with line breaks taking priority over sentence breaks
     chunks_with_pauses, total_pause_duration = chunk_text_with_line_break_priority(text_content, max_words=50, pause_duration=0.1)
+    
+    # Restore + leak-assert so no placeholder ever reaches TTS/metadata
+    for chunk_data in chunks_with_pauses:
+        chunk_data['text'] = finalize_text(chunk_data['text'], _pctx, where="single-chunk")
     
     # Extract just the text parts for processing
     chunks = [chunk_data['text'] for chunk_data in chunks_with_pauses]
@@ -5299,6 +5417,7 @@ def create_audiobook_with_original_voice_metadata(
 
     TTS_LIVE.update({"running": True, "stop": False, "t_start": t_start, "beat": t_start,
                      "chunk": 0, "total": len(chunks_to_process), "eta": 0.0, "ends_at": "—",
+                     "suspect": 0,
                      "paused": False, "label": "TTS SINGLE", "job": TTS_LIVE.get("job", 0) + 1})
     threading.Thread(target=_tts_heartbeat, daemon=True).start()
     tlog(f"Job started at {start_stamp} — {len(chunks_to_process)} chunk(s) to process")
@@ -5415,6 +5534,7 @@ def create_audiobook_with_original_voice_metadata(
             _rtf = _rtf_dur / c_elapsed if c_elapsed > 0 else 0
             TTS_LIVE["avg"] = avg
             tlog(f"  Chunk {chunk_num} done in {c_elapsed:.1f}s | elapsed {elapsed:.0f}s | ETA {eta:.0f}s (ends ~{ends_at}) | {_rtf_dur:.1f}s audio ({_rtf:.2f}× realtime)")
+            _coverage_ok("TTS SINGLE", len(chunk_text), _rtf_dur, TTS_LIVE, tag=f" chunk {chunk_num}")
             if progress is not None:
                 try:
                     progress((i + 1) / len(chunks_to_process),
@@ -5514,6 +5634,8 @@ def create_audiobook_with_original_voice_metadata(
                    f" • Avg: {total_elapsed / max(done_new, 1):.1f}s/chunk")
     if cancelled or failed_list:
         timing_info += f" • Last projected end: {last_ends_at}"
+    if TTS_LIVE.get("suspect"):
+        timing_info += f"\n⚠️ {TTS_LIVE['suspect']} chunk(s) suspiciously short — possible missing words, check them"
     success_msg = f"{head}\n🎭 Voice: {original_voice_config['display_name']}\n📊 {total_words:,} words in {total_chunks} chunks\n⏱️ Duration: ~{duration_minutes} minutes{pause_info}\n📁 Saved to: {project_dir}\n🎵 Files: {len(audio_chunks)} audio chunks\n💾 Metadata saved for regeneration{timing_info}"
     tlog(f"FINISHED at {end_stamp} | total {total_elapsed:.1f}s | {len(audio_chunks)} chunks | {project_dir}")
     final_timing = (f"<div class='audiobook-status'>⏱️ Started <b>{start_stamp}</b> • ended <b>{end_stamp}</b> • "
@@ -5526,7 +5648,7 @@ def create_audiobook_with_original_voice_metadata(
     _session_add("TTS SINGLE", len(combined_audio) / _ssr, total_elapsed)
 
 def create_audiobook_with_volume_settings(model, text_content, voice_library_path, selected_voice, project_name, 
-                                         enable_norm=True, target_level=-18.0, language_id="en", progress=gr.Progress(track_tqdm=True)):
+                                         enable_norm=True, target_level=-18.0, language_id="en", progress=gr.Progress(track_tqdm=True), natural=False):
     """Wrapper for create_audiobook that applies volume normalization settings"""
     # Get the voice config and temporarily apply volume settings
     voice_config = get_voice_config(voice_library_path, selected_voice)
@@ -5553,7 +5675,7 @@ def create_audiobook_with_volume_settings(model, text_content, voice_library_pat
         # Stream live yields through to the UI
         for item in create_audiobook_with_original_voice_metadata(
             model, text_content, voice_library_path, temp_voice_name, project_name, selected_voice,
-            language_id=language_id, progress=progress
+            language_id=language_id, progress=progress, natural=natural
         ):
             yield item
         
@@ -5578,7 +5700,8 @@ def create_multi_voice_audiobook_with_original_voice_metadata(
     resume: bool = False,
     autosave_interval: int = 10,
     language_id: str = "en",
-    progress=None
+    progress=None,
+    natural: bool = False
 ) -> tuple:
     """Create multi-voice audiobook but save original voice names in metadata (for volume normalization)"""
     # This is a modified version that preserves original voice names in metadata
@@ -5589,7 +5712,7 @@ def create_multi_voice_audiobook_with_original_voice_metadata(
     result = None
     for item in create_multi_voice_audiobook_with_assignments(
         model, text_content, voice_library_path, project_name, temp_voice_assignments, resume, autosave_interval,
-        language_id=language_id, progress=progress
+        language_id=language_id, progress=progress, natural=natural
     ):
         result = item
         yield item
@@ -5649,7 +5772,7 @@ def create_multi_voice_audiobook_with_original_voice_metadata(
     return
 
 def create_multi_voice_audiobook_with_volume_settings(model, text_content, voice_library_path, project_name, 
-                                                     voice_assignments, enable_norm=True, target_level=-18.0, language_id="en", progress=gr.Progress(track_tqdm=True)):
+                                                     voice_assignments, enable_norm=True, target_level=-18.0, language_id="en", progress=gr.Progress(track_tqdm=True), natural=False):
     """Wrapper for multi-voice audiobook creation that applies volume normalization settings"""
     # Apply volume settings to all voice assignments
     if enable_norm:
@@ -5678,7 +5801,7 @@ def create_multi_voice_audiobook_with_volume_settings(model, text_content, voice
         # Stream live yields through to the UI
         for item in create_multi_voice_audiobook_with_original_voice_metadata(
             model, text_content, voice_library_path, project_name, temp_assignments, voice_assignments,
-            language_id=language_id, progress=progress
+            language_id=language_id, progress=progress, natural=natural
         ):
             yield item
         
@@ -5692,7 +5815,7 @@ def create_multi_voice_audiobook_with_volume_settings(model, text_content, voice
     else:
         for item in create_multi_voice_audiobook_with_assignments(
             model, text_content, voice_library_path, project_name, voice_assignments,
-            language_id=language_id, progress=progress
+            language_id=language_id, progress=progress, natural=natural
         ):
             yield item
 
@@ -6364,6 +6487,11 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
                             value="en",
                             info="Select the language for speech synthesis"
                         )
+                        natural_speech = gr.Checkbox(
+                            label="Natural spoken numbers (Bengali)",
+                            value=False,
+                            info="Speak ৫০%/৳১,০০০/৫:৩০ as words (off = digits preserved)"
+                        )
                     
                     # Project Settings
                     with gr.Group():
@@ -6587,6 +6715,11 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
                             label="Choose Language",
                             value="en",
                             info="Select the language for speech synthesis"
+                        )
+                        multi_natural_speech = gr.Checkbox(
+                            label="Natural spoken numbers (Bengali)",
+                            value=False,
+                            info="Speak ৫০%/৳১,০০০/৫:৩০ as words (off = digits preserved)"
                         )
                 
                 with gr.Column(scale=1):
@@ -7606,7 +7739,7 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
     # Enhanced Audiobook Creation with chunking and saving
     process_btn.click(
         fn=create_audiobook_with_volume_settings,
-        inputs=[model_state, audiobook_text, voice_library_path_state, audiobook_voice_selector, project_name, enable_volume_norm, target_volume_level, audiobook_language],
+        inputs=[model_state, audiobook_text, voice_library_path_state, audiobook_voice_selector, project_name, enable_volume_norm, target_volume_level, audiobook_language, natural_speech],
         outputs=[audiobook_output, audiobook_status, audiobook_timing, audiobook_chunktxt, single_pause_btn]
     ).then(
         fn=force_refresh_all_project_dropdowns,
@@ -7647,7 +7780,7 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
     # Multi-voice audiobook creation (using voice assignments)
     process_multi_btn.click(
         fn=create_multi_voice_audiobook_with_volume_settings,
-        inputs=[model_state, multi_audiobook_text, voice_library_path_state, multi_project_name, voice_assignments_state, multi_enable_volume_norm, multi_target_volume_level, multi_language],
+        inputs=[model_state, multi_audiobook_text, voice_library_path_state, multi_project_name, voice_assignments_state, multi_enable_volume_norm, multi_target_volume_level, multi_language, multi_natural_speech],
         outputs=[multi_audiobook_output, multi_audiobook_status, multi_audiobook_timing, multi_audiobook_chunktxt, multi_pause_btn]
     ).then(
         fn=force_refresh_all_project_dropdowns,
