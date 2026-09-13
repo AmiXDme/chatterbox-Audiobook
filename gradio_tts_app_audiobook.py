@@ -342,7 +342,6 @@ TTS_LIVE = {"running": False, "stop": True, "t_start": 0.0, "chunk": 0,
             "label": "TTS", "job": 0, "beat": 0.0}
 TTS_HEARTBEAT_SECONDS = 5
 
-
 def _rss_mb():
     """Current process RAM in MB (Linux /proc, fallback 0)."""
     try:
@@ -1546,20 +1545,9 @@ def create_audiobook(
 
     # Import pause processing functions
     from src.audiobook.processing import chunk_text_with_line_break_priority, create_silence_audio
-    from src.audiobook.langtext import protect_all, normalize_text, finalize_text
-
-    # Staged protection (tags > URLs > emails > numbers > lists > acronyms >
-    # abbreviations), then symbol/whitespace normalization on unprotected text.
-    # English behaves exactly as before (its profile matches legacy rules).
-    text_content, _pctx = protect_all(text_content, language_id, natural=natural)
-    text_content = normalize_text(text_content, language_id, symbols=not natural)
 
     # Chunk text with line breaks taking priority over sentence breaks
     chunks_with_pauses, total_pause_duration = chunk_text_with_line_break_priority(text_content, max_words=50, pause_duration=0.1)
-    
-    # Restore + leak-assert so no placeholder ever reaches TTS/metadata
-    for chunk_data in chunks_with_pauses:
-        chunk_data['text'] = finalize_text(chunk_data['text'], _pctx, where="single-chunk")
     
     # Extract just the text parts for processing
     chunks = [chunk_data['text'] for chunk_data in chunks_with_pauses]
@@ -5349,20 +5337,9 @@ def create_audiobook_with_original_voice_metadata(
     
     # Import pause processing functions
     from src.audiobook.processing import chunk_text_with_line_break_priority, create_silence_audio
-    from src.audiobook.langtext import protect_all, normalize_text, finalize_text
-
-    # Staged protection (tags > URLs > emails > numbers > lists > acronyms >
-    # abbreviations), then symbol/whitespace normalization on unprotected text.
-    # English behaves exactly as before (its profile matches legacy rules).
-    text_content, _pctx = protect_all(text_content, language_id, natural=natural)
-    text_content = normalize_text(text_content, language_id, symbols=not natural)
 
     # Chunk text with line breaks taking priority over sentence breaks
     chunks_with_pauses, total_pause_duration = chunk_text_with_line_break_priority(text_content, max_words=50, pause_duration=0.1)
-    
-    # Restore + leak-assert so no placeholder ever reaches TTS/metadata
-    for chunk_data in chunks_with_pauses:
-        chunk_data['text'] = finalize_text(chunk_data['text'], _pctx, where="single-chunk")
     
     # Extract just the text parts for processing
     chunks = [chunk_data['text'] for chunk_data in chunks_with_pauses]
@@ -6052,7 +6029,7 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
         <h1>🎧 Chatterbox TTS - Audiobook Edition</h1>
         <p>Professional voice cloning for audiobook creation</p>
     </div>
-    """)
+""")
     
     with gr.Tabs():
         
@@ -6490,11 +6467,6 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
                             value="en",
                             info="Select the language for speech synthesis"
                         )
-                        natural_speech = gr.Checkbox(
-                            label="Natural spoken numbers (Bengali)",
-                            value=False,
-                            info="Speak ৫০%/৳১,০০০/৫:৩০ as words (off = digits preserved)"
-                        )
                     
                     # Project Settings
                     with gr.Group():
@@ -6719,11 +6691,6 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
                             label="Choose Language",
                             value="en",
                             info="Select the language for speech synthesis"
-                        )
-                        multi_natural_speech = gr.Checkbox(
-                            label="Natural spoken numbers (Bengali)",
-                            value=False,
-                            info="Speak ৫০%/৳১,০০০/৫:৩০ as words (off = digits preserved)"
                         )
                 
                 with gr.Column(scale=1):
@@ -7828,7 +7795,7 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
     # Enhanced Audiobook Creation with chunking and saving
     process_btn.click(
         fn=create_audiobook_with_volume_settings,
-        inputs=[model_state, audiobook_text, voice_library_path_state, audiobook_voice_selector, project_name, enable_volume_norm, target_volume_level, audiobook_language, natural_speech],
+        inputs=[model_state, audiobook_text, voice_library_path_state, audiobook_voice_selector, project_name, enable_volume_norm, target_volume_level, audiobook_language],
         outputs=[audiobook_output, audiobook_status, audiobook_timing, audiobook_chunktxt, single_pause_btn]
     ).then(
         fn=force_refresh_all_project_dropdowns,
@@ -7871,7 +7838,7 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
     # Multi-voice audiobook creation (using voice assignments)
     process_multi_btn.click(
         fn=create_multi_voice_audiobook_with_volume_settings,
-        inputs=[model_state, multi_audiobook_text, voice_library_path_state, multi_project_name, voice_assignments_state, multi_enable_volume_norm, multi_target_volume_level, multi_language, multi_natural_speech],
+        inputs=[model_state, multi_audiobook_text, voice_library_path_state, multi_project_name, voice_assignments_state, multi_enable_volume_norm, multi_target_volume_level, multi_language],
         outputs=[multi_audiobook_output, multi_audiobook_status, multi_audiobook_timing, multi_audiobook_chunktxt, multi_pause_btn]
     ).then(
         fn=force_refresh_all_project_dropdowns,

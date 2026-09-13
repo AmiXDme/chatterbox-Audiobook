@@ -1,7 +1,7 @@
 """Headless Bengali TTS example (no browser, no Gradio UI).
 
 Demonstrates the documented pipeline directly:
-protect -> normalize -> segment -> restore -> BanglaTTS.generate.
+BanglaTTS.generate.
 
 Usage:
     ./venv/bin/python examples_bangla_tts.py "আমি বাংলায় কথা বলি।" voice.wav out.wav
@@ -19,9 +19,6 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
 
 from src.audiobook.bangla import BanglaTTS, BANGLA_DIR
-from src.audiobook.langtext import (
-    protect_all, normalize_text, segment_sentences, finalize_text,
-)
 import numpy as np
 import soundfile as sf
 
@@ -54,9 +51,10 @@ def main(argv):
     conds = model.prepare_conditionals(ref, 0.5)
     print("Voice ready.", flush=True)
 
-    ptext, ctx = protect_all(text, "bn")
-    sents = segment_sentences(normalize_text(ptext, "bn"), "bn")
-    final = [finalize_text(s, ctx, where="gen") for s in sents]
+    # Text is used exactly as given (numbers, years, currency etc. should be
+    # written out as spoken Bangla words beforehand — e.g. via an online AI).
+    sents = [s for s in (x.strip() for x in text.replace("\r", "").splitlines()) if s]
+    final = [s + "।" if not s.endswith(("।", "!", "?", ".")) else s for s in sents]
     print(f"{len(final)} sentence(s) to speak.", flush=True)
 
     parts = []

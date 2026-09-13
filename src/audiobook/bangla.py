@@ -31,15 +31,12 @@ try:
 except ImportError:
     HF_HUB_AVAILABLE = False
 
-try:
-    # Shared locale helper (bn/bn-BD/bn_BD -> bn). No cycle: langtext
-    # imports nothing from this module.
-    from src.audiobook.langtext import normalize_locale
-except ImportError:
-    try:
-        from .langtext import normalize_locale
-    except ImportError:
-        normalize_locale = None
+def normalize_locale(language_id):
+    """bn, bn-BD, bn_BD, bn-IN -> 'bn'; anything else descends as-is."""
+    s = (language_id or "").strip().lower().replace("_", "-")
+    if s == "bn" or s.startswith("bn-"):
+        return "bn"
+    return s
 
 
 BANGLA_LANG = "bn"
@@ -78,12 +75,10 @@ def is_bangla(language_id) -> bool:
 
     Accepts bn, bn-BD, bn_BD, bn-IN (etc.) — anything else is not Bangla.
     """
-    if normalize_locale is not None:
-        try:
-            return normalize_locale(language_id) == BANGLA_LANG
-        except Exception:
-            pass
-    return (language_id or "").strip().lower() == BANGLA_LANG
+    try:
+        return normalize_locale(language_id) == BANGLA_LANG
+    except Exception:
+        return (language_id or "").strip().lower() == BANGLA_LANG
 
 
 class BanglaTTS(ChatterboxTTS):

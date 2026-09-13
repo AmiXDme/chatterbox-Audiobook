@@ -114,24 +114,8 @@ Unchanged from before: voice library with clone-from-sample, professional loudne
 ### 🌍 Per-Language Sample Text
 Switching the language dropdown auto-fills a native sample sentence (24 languages, incl. Bengali) — only when the box is empty or still holds a previous sample; your own typed text is never overwritten. Applies to the TTS, single-voice, and multi-voice tabs.
 
-### 🈂️ Per-Language Text Processing (en / bn / hi)
-English, Bengali and Hindi each get their own text pipeline (`src/audiobook/langtext.py`); all other languages keep exact legacy behavior:
-- **Sentence enders**: Bengali/Hindi split on `।` (dari) as well as `. ! ?` — previously multi-sentence dari text fused into single chunks
-- **Abbreviation protection**: `Dr.` / `ড.` / `डॉ.` etc. never end a sentence mid-chunk (placeholder hidden before splitting, restored before TTS/metadata so it never leaks into audio)
-- **Symbol words**: `% ₹ ৳ $ & #` spoken natively (`50%` → `50 শতাংশ` / `50 प्रतिशत` / `50 percent`; `৳`=টাকা kept distinct from `₹`=রুপি)
-- **Newlines untouched**: pause calculation downstream is unaffected; `[Character]` tags pass through unmodified
-
-### 🔬 Bangla TN Engine (deterministic, spec-driven)
-Staged protection engine with per-call registry — tags → URLs → emails → phones → numbers/decimals/versions/IPs → list markers → acronyms → abbreviations (more-specific always wins), then segmentation with priority STRONG (`। ! ?`) > MEDIUM (`.`, context-checked) > never `: ; ,`:
-- **Protected, never split**: decimals (`৩.১৪`), versions (`২.১.৩`, `v2.1`), IPs, domains (`example.com`), emails, phones, `১.` list markers, bare `।`-handling with closing quotes glued (`।”`)
-- **Natural spoken mode** (opt-in checkbox on both audiobook tabs, default OFF = digits preserved): full Bengali number engine (০–৯৯, হাজার/লাখ/কোটি, both groupings), ordinals (`১ম`→`প্রথম`), date-forms, classifiers, fractions, ranges, percents, currency with paise, times/dates, phones (digit-spelled), acronyms (`API`→`এপিআই`), units — unknown forms left untouched, never hallucinated.
-- **Natural clock words**: `১:৩০`→`দেড়টা`, `৫:৩০`→`সাড়ে পাঁচটা`, `৫:১৫`→`সোয়া পাঁচটা`, `৫:৪৫`→`পৌনে ছয়টা` (24h folds to 12h; `দেড়টা` reserved for true 1:30)
-  - Preserve: `ড. রহমান ৫০ শতাংশ ছাড়ে ৩টি বই টাকা ১,০০০ দিয়ে কিনলেন।`
-  - Natural: `ড. রহমান পঞ্চাশ শতাংশ ছাড়ে তিনটি বই এক হাজার টাকা দিয়ে কিনলেন।`
-- **Locales**: `bn`, `bn-BD`, `bn-IN` all normalize correctly (previously `bn-BD` silently fell back to English rules + wrong model)
-- **Grapheme-safe**: word-boundary cuts only; conjuncts/hasanta/matras/nukta verified intact; ZWJ/ZWNJ never stripped; BOM stripped; NFC canonicalized
-- **Audit CLI**: `python3 src/audiobook/lang_audit.py book.txt --locale bn-BD [--natural]` dumps RAW→PROTECTED→SEGMENTED→RESTORED with timings, protected-token table, unknown-token report, leak asserts
-- **Golden suite**: `python3 tests/test_langtext.py` — 49 headless tests (no model/GPU/network): golden examples, natural-mode cases, leak/loss/determinism guards
+### 🈂️ Bangla Text: used as typed
+Bengali text goes to the model **exactly as you type it** — numbers, years, currency and edge cases are **not** rewritten locally. Write them out as spoken Bangla words beforehand (e.g. prepare the text with an online AI) so the fine-tune voices them correctly: `১৯৮৭` → `উনিশশো সাতাশি`, `৫:৩০` → `সাড়ে পাঁচটা`, `৳৫০০` → `পাঁচশ টাকা`.
 
 ---
 
@@ -239,13 +223,7 @@ In: `.txt/.md`, voice samples `.wav/.mp3/.flac`. Out: 16-bit mono `.wav` chunks 
 
 **Missing-words fix (user report):** TTS tab pre-splits long segments into sentence groups (single 1000-token call silently cut tails); `_find_unk_words()` pre-scans input against the resolved model's vocab and warns with exact words (proven: full Bengali coverage, only emoji UNKs); `_coverage_ok()` guard flags any output suspiciously short for its input (per-chunk + finales + VC in/out ratio) with suspect counts in UI status.
 
-**Natural-mode wave 2:** year-aware verbalization (`১৯৮৭ সালে`→`উনিশশো সাতাশি সালে`, quantities untouched); rule-ID tracing (`BN_CURR_001` etc. shown in audit); spaced-initials protection (`M. A. Rahman`); control-char sanitizer; long-sentence advisory in audit; 53 golden tests green.
-
-**Per-language pipelines (user idea):** new `src/audiobook/langtext.py` — en/bn/hi profiles (enders, abbreviations, symbol words); dari added to all sentence splitters; abbreviation protect/restore cycle in single + multi + legacy cores; verified by headless tests (dari splits 3-from-1, `Dr.` never splits, symbols expand, newlines preserved).
-
-**Bangla TN engine (700-section spec, 1 explore agent):** staged per-call protection registry (tags→URLs→emails→phones→numbers→lists→acronyms→abbreviations, specific-wins, collision-safe, leak-asserted); priority segmentation (STRONG ।!?, context-checked MEDIUM `.`, never `:;,`); bare-domain protection; `₹`/`৳` distinction; `bn-BD`/`bn-IN` normalization (model routing + profiles); dari reattach + batch-dari fixes; script-aware short-chunk filter; `tests/test_langtext.py` (33 golden tests, all green); `src/audiobook/lang_audit.py` CLI. Tests caught 4 real bugs during development (ESC-restore assert, ellipsis shatter, bare domains, quote-gluing).
-
-**Natural spoken Bengali (opt-in):** `src/audiobook/bn_numbers.py` (০–৯৯, হাজার/লাখ/কোটি, both digit scripts/groupings, ordinals, date-forms, fractions, ranges, percents, currency+paise incl. `৳(৫০০)`, times/dates, phones, acronyms, units, v-versions, ratios); UI checkbox on both audiobook tabs (default OFF = preserve); nested-quote merge; `…` boundary; letter/roman lists; hashtags/mentions preserved; ratio vs time disambiguation; leading-minus; grapheme utils; BOM/NFC; unknown-token report + `--natural` in audit CLI; 49 golden tests green.
+**Natural-mode wave 2:** year-aware verbalization (`১৯৮৭ সালে`→`উনিশশো সাতাশি সালে`, quantities untouched); rule-ID tracing (`BN_CURR_001` etc. shown in audit); spaced-initials protection (`M. A. Rahman`); control-char sanitizer; long-sentence advisory in audit; 53 golden tests green. *(Removed: Bangla text is now used exactly as typed — normalize it online yourself.)*
 
 **Multi-voice tag routing fix:** voice tags now split on RAW text before any protection (previously `[রহিম]` was hidden from the splitter → whole book collapsed to Narrator); `[১]`-style footnotes excluded via letter-allowlist in both parsers; currency amounts protected as one unit (no more `টাকা ১,০০০` word flip).
 

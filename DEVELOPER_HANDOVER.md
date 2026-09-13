@@ -15,7 +15,6 @@ A CPU-only **text-to-speech audiobook studio** (Gradio web UI) built on Resemble
 |---|---|
 | `gradio_tts_app_audiobook.py` | EVERYTHING UI + orchestration: tab layouts, all event wiring, single/multi/batch/regen/combine flows, realtime engine (heartbeat, cancel/pause, ETA), model singletons, LAN/QR startup |
 | `src/audiobook/bangla.py` | Bengali support: `BanglaTTS` adapter, lazy singleton loader, language router, evictor |
-| `src/audiobook/langtext.py` | Per-language text profiles (en/bn/hi): enders, abbreviations, symbol words |
 | `src/audiobook/processing.py` | Text chunking (sentence/pause/line-break aware), audio save helpers |
 | `src/audiobook/{models,project_management,voice_management,config,audio_processing}.py` | Refactor-library modules (mostly **unused** by the running app — see §6) |
 | `src/chatterbox/mtl_tts.py` | Multilingual model class (23 langs + `bn` label) |
@@ -38,7 +37,7 @@ A CPU-only **text-to-speech audiobook studio** (Gradio web UI) built on Resemble
 3. **Module-tree rule**: the package exists as `src.chatterbox.*` AND `chatterbox.*` (editable install). Shared mutable state must handle both (see `T3_PROGRESS` dual-read); prefer `src.*` imports in new code.
 4. **No `signal.alarm` in workers**: Gradio runs handlers in threads — alarms only on main thread (`_USE_ALARM` gate).
 5. **`language_id` threading**: every generation entry point must resolve/forward it, or `bn` silently falls back to multilingual.
-6. **Placeholder hygiene**: `langtext` abbreviation placeholders (`\uE000`) must be restored before TTS/metadata.
+6. **Bangla text is used as typed**: no local normalization layer exists — `bn` text goes to the fine-tune verbatim. Normalize numbers/currency/years to spoken Bangla words before generation (typed manually or via an online AI), or the model voices them poorly.
 7. **No blocking calls in handlers** except through the cancel/pause-gated loops.
 
 ## 6. Known dead code (leave alone unless reviving)
@@ -53,7 +52,7 @@ A CPU-only **text-to-speech audiobook studio** (Gradio web UI) built on Resemble
 ./launch_audiobook.sh    # app on :7860 + LAN URL/QR
 python3 -m py_compile gradio_tts_app_audiobook.py   # syntax gate (no test suite exists)
 ```
-Headless checks need no GPU: `langtext` profile tests, tokenizer vocab assertions, safetensors header reads. Full generation test = one short sentence per touched path (minutes on CPU).
+Headless checks need no GPU: tokenizer vocab assertions, safetensors header reads. Full generation test = one short sentence per touched path (minutes on CPU).
 
 ## 8. Deliberate limitations
 - No auth on the Gradio server (LAN + `share=False` by default; do not expose publicly as-is)
