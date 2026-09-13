@@ -342,6 +342,34 @@ TTS_LIVE = {"running": False, "stop": True, "t_start": 0.0, "chunk": 0,
             "label": "TTS", "job": 0, "beat": 0.0}
 TTS_HEARTBEAT_SECONDS = 5
 
+GEMINI_CFG = {"enabled": False, "api_key": ""}
+
+
+def gemini_rewrite(text, language_id):
+    """Precise AI normalization for Bangla. Returns (text, used_gemini). Safe."""
+    if not (GEMINI_CFG.get("enabled") and GEMINI_CFG.get("api_key")):
+        return text, False
+    try:
+        from src.audiobook.bangla import is_bangla
+        if not is_bangla(language_id):
+            return text, False
+    except Exception:
+        return text, False
+    if not text or not text.strip():
+        return text, False
+    try:
+        from src.audiobook.gemini_normalizer import gemini_normalize
+        n = len(text)
+        print(f"🤖 [GEMINI] Normalizing Bangla text ({n} chars)...", flush=True)
+        out = gemini_normalize(text, GEMINI_CFG.get("api_key"))
+        print(f"🤖 [GEMINI] Done → {len(out)} chars (was {n}).", flush=True)
+        print(f"🤖 [GEMINI] Normalized: {out[:400]}{'…' if len(out) > 400 else ''}", flush=True)
+        return out, True
+    except Exception as e:
+        print(f"🤖 [GEMINI] Skipped ({e}) → used text as typed.", flush=True)
+        return text, False
+
+
 def _rss_mb():
     """Current process RAM in MB (Linux /proc, fallback 0)."""
     try:
@@ -861,6 +889,9 @@ def generate(model, text, audio_prompt_path, exaggeration, temperature, seed_num
 
     # Bengali routes to the Bangla fine-tune singleton (rest stays multilingual)
     model = _resolve_model_for_language(model, language_id)
+
+    # Optional AI normalization (Gemini, precise ruleset): digits → spoken Bangla
+    text, _used_gemini = gemini_rewrite(text, language_id)
 
     # Warn about out-of-vocabulary words (checked against the RESOLVED model's
     # vocab): they become [UNK] tokens the model skips or garbles.
@@ -1545,6 +1576,9 @@ def create_audiobook(
 
     # Import pause processing functions
     from src.audiobook.processing import chunk_text_with_line_break_priority, create_silence_audio
+
+    # Optional AI normalization (Gemini, precise ruleset): digits → spoken Bangla
+    text_content, _used_gemini = gemini_rewrite(text_content, language_id)
 
     # Chunk text with line breaks taking priority over sentence breaks
     chunks_with_pauses, total_pause_duration = chunk_text_with_line_break_priority(text_content, max_words=50, pause_duration=0.1)
@@ -5338,6 +5372,10 @@ def create_audiobook_with_original_voice_metadata(
     # Import pause processing functions
     from src.audiobook.processing import chunk_text_with_line_break_priority, create_silence_audio
 
+    # Optional AI normalization (Gemini, precise ruleset): digits → spoken Bangla.
+    # It preserves [Name] tags so multi-voice routing still works downstream.
+    text_content, _used_gemini = gemini_rewrite(text_content, language_id)
+
     # Chunk text with line breaks taking priority over sentence breaks
     chunks_with_pauses, total_pause_duration = chunk_text_with_line_break_priority(text_content, max_words=50, pause_duration=0.1)
     
@@ -6031,6 +6069,47 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
     </div>
 """)
     
+    def _gemini_set_enabled(v):
+        GEMINI_CFG["enabled"] = bool(v)
+        return gr.update(value="🤖 AI normalization: ON (Bangla)" if bool(v) else "🤖 AI normalization: OFF")
+
+    def _gemini_set_key(v):
+        GEMINI_CFG["api_key"] = (v or "").strip()
+        return None
+
+    def _gemini_test(enable, key):
+        from src.audiobook.gemini_normalizer import api_key_ok, gemini_normalize
+        if enable and not api_key_ok(key):
+            return "❌ Key invalid — must start with 'AIza' (google ai studio → apikey)"
+        if not enable:
+            return "ℹ️ Enable AI normalization first."
+        try:
+            out = gemini_normalize("ড. রহমান ৫০% ছাড়ে ৩টি বই ৳১,০০০ দিয়ে কিনলেন।", key)
+            good = "পঞ্চাশ শতাংশ" in out and "এক হাজার টাকা" in out and "[UNK]" not in out
+            return f"✅ Works ({len(out)} chars). Test output: {out[:120]}" + ("" if good else " ⚠️ check rules")
+        except Exception as e:
+            return f"❌ {e}"
+
+    with gr.Accordion("🤖 AI Text Normalization (Gemini) — for Bangla", open=False):
+        gr.Markdown(
+            "Raw Bangla text → **Gemini rewrites digits/currency/years/clock-times into "
+            "spoken Bangla** (using the exact ruleset from the former local engine) → the "
+            "normalized text goes to Chatterbox. **If it is off or fails, your text is used "
+            "exactly as typed** — this never breaks generation. A free key: "
+            "[Google AI Studio](https://aistudio.google.com/apikey)."
+        )
+        with gr.Row():
+            gemini_enable = gr.Checkbox(label="Enable (Bangla)", value=False,
+                                        info="For Bengali, numbers/currency/years become words before TTS")
+            gemini_api_key = gr.Textbox(label="Gemini API key", type="password",
+                                        placeholder="AIza... (Google AI Studio)",
+                                        info="Kept in memory only, never saved/logged")
+            gemini_test_btn = gr.Button("Test", size="sm")
+        gemini_status = gr.Markdown("🤖 AI normalization: OFF")
+        gemini_enable.change(fn=_gemini_set_enabled, inputs=[gemini_enable], outputs=[gemini_status])
+        gemini_api_key.change(fn=_gemini_set_key, inputs=[gemini_api_key], outputs=[])
+        gemini_test_btn.click(fn=_gemini_test, inputs=[gemini_enable, gemini_api_key], outputs=[gemini_status])
+
     with gr.Tabs():
         
         # Enhanced TTS Tab with Voice Selection
