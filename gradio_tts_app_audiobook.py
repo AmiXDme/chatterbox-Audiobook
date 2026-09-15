@@ -107,6 +107,11 @@ except ImportError as e:
     _is_bangla = None
     _evict_bangla = None
 
+# Second Bangla model (EMTIAZZ T3 fine-tune, vocab 4240) as its own language
+# entry in every dropdown. bn -> BosonLab, bn2 -> EMTIAZZ.
+if CHATTERBOX_AVAILABLE and "bn2" not in SUPPORTED_LANGUAGES:
+    SUPPORTED_LANGUAGES = {**SUPPORTED_LANGUAGES, "bn2": "বাংলা (EMTIAZZ)"}
+
 def _evict_model(cache_dict, tag) -> bool:
     """Drop a cached model to free RAM. Returns True if anything was freed."""
     try:
@@ -157,6 +162,7 @@ def _resolve_model_for_language(model, language_id):
 DEFAULT_TEXTS = {
     "en": "Hello! This is a test of the text to speech system. How does my voice sound?",
     "bn": "আমি বাংলায় কথা বলতে পারি। এটি একটি পরীক্ষামূলক বাক্য।",
+    "bn2": "আমি বাংলায় কথা বলতে পারি। এটি একটি পরীক্ষামূলক বাক্য।",
     "ar": "مرحباً! هذا اختبار لنظام تحويل النص إلى كلام. كيف يبدو صوتي؟",
     "da": "Hej! Dette er en test af tekst-til-tale-systemet. Hvordan lyder min stemme?",
     "de": "Hallo! Dies ist ein Test des Text-to-Speech-Systems. Wie klingt meine Stimme?",

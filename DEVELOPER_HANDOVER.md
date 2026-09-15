@@ -6,7 +6,7 @@ A CPU-only **text-to-speech audiobook studio** (Gradio web UI) built on Resemble
 ## 2. Tech stack
 - **Language:** Python 3.10+ (3.12 on this machine), `venv/` isolated env
 - **UI:** Gradio 6.x (`gradio_tts_app_audiobook.py`, ~8,700 lines, single monolith)
-- **TTS models:** Chatterbox Multilingual V3 (23 langs, `models-multilingual/`) + BosonLab Bangla fine-tune (`models-bangla/`) + optional Voice Conversion (`models/`)
+- **TTS models:** Chatterbox Multilingual V3 (23 langs, `models-multilingual/`) + TWO Bengali fine-tunes — BosonLab (`models-bangla/`, vocab 2530, dropdown `bn`) and EMTIAZZ (`models-bangla2/`, vocab 4240, dropdown `bn2`) + optional Voice Conversion (`models/`)
 - **ML:** PyTorch CPU, safetensors checkpoints, librosa/soundfile/scipy audio I/O
 - **Launchers:** `install-audiobook.sh`, `launch_audiobook.sh`, `launch_local.sh`, `launch_network.sh`
 
@@ -14,7 +14,7 @@ A CPU-only **text-to-speech audiobook studio** (Gradio web UI) built on Resemble
 | File | Owns |
 |---|---|
 | `gradio_tts_app_audiobook.py` | EVERYTHING UI + orchestration: tab layouts, all event wiring, single/multi/batch/regen/combine flows, realtime engine (heartbeat, cancel/pause, ETA), model singletons, LAN/QR startup |
-| `src/audiobook/bangla.py` | Bengali support: `BanglaTTS` adapter, lazy singleton loader, language router, evictor |
+| `src/audiobook/bangla.py` | Bengali support: `BanglaTTS`/`BanglaTTS2` adapters, per-variant singleton loaders (bosonlab/emtiazz), T3 rebuild 704→4240 loader, language router, evictor |
 | `src/audiobook/processing.py` | Text chunking (sentence/pause/line-break aware), audio save helpers |
 | `src/audiobook/{models,project_management,voice_management,config,audio_processing}.py` | Refactor-library modules (mostly **unused** by the running app — see §6) |
 | `src/chatterbox/mtl_tts.py` | Multilingual model class (23 langs + `bn` label) |
@@ -28,7 +28,7 @@ A CPU-only **text-to-speech audiobook studio** (Gradio web UI) built on Resemble
 - **Singleton loaders** — `load_model()` / `load_bangla_model()` / `load_vc_model()` load weights exactly once (double-checked locking); `♻️ Reusing` means cache hit
 - **Streaming generators** — long jobs `yield (audio, status, timing, chunktext, pausebtn)` per chunk so Gradio UI updates live
 - **Heartbeat** — background thread printing a terminal tick every 5 s (progress, ETA, tok/s, RAM); driven by `TTS_LIVE` / `VC_LIVE` dicts
-- **`language_id`** — 2-letter code (`en`, `bn`, …); `bn` routes to the Bangla singleton, everything else to multilingual
+- **`language_id`** — code (`en`, `bn`, `bn2`, …); `bn` routes to the BosonLab Bangla singleton, `bn2` to EMTIAZZ, everything else to multilingual. One-at-a-time is now a 3-way rule (multilingual | bn | bn2).
 - **Resume** — completed chunk WAVs on disk are skipped on re-run; failed chunks are recorded and skipped, never fatal
 
 ## 5. Critical invariants (break these and the app breaks)

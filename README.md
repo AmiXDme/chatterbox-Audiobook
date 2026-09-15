@@ -22,7 +22,7 @@ Open the printed link (`http://127.0.0.1:7860`). Available scripts:
 
 **No model preload by design:** the UI opens in seconds with zero models loaded. **You** pick the language first — the right model (multilingual or Bangla) loads on your first Generate/Create click via `load_model(language_id)`. Bengali-only users never download or load the multilingual weights at all.
 
-**Strict one-model-at-a-time:** picking EN runs *only* multilingual; picking BN evicts multilingual and runs *only* Bangla (and vice versa) — caches cleared + RAM trimmed + UI state synced, logged as `[MEM] Evicted …`. Alternating languages reloads each switch; sticking to one never reloads.
+**Strict one-model-at-a-time (3-way):** picking EN runs *only* multilingual; picking BN (`bn` or `bn2`) evicts multilingual and runs *only* one Bangla model (and vice versa); switching `bn`↔`bn2` evicts the other Bangla model — caches cleared + RAM trimmed + UI state synced, logged as `[MEM] Evicted …`. Alternating languages reloads each switch; sticking to one never reloads.
 
 | Script | Purpose |
 |---|---|
@@ -51,6 +51,7 @@ Open the printed link (`http://127.0.0.1:7860`). Available scripts:
 | Generated audiobooks (per-chunk WAVs + metadata) | `audiobook_projects/<project>/` |
 | Voice conversion outputs | `vc_output/<source>_<timestamp>/` (per-chunk files + `*_converted_full.wav`) |
 | Bengali TTS model (~2 GB, first Bengali use) | `models-bangla/` (`t3_cfg.safetensors`, `s3gen.safetensors`, `ve.safetensors`, `tokenizer.json`, `conds.pt`) |
+| Second Bengali model — EMTIAZZ (bn2, ~2.2 GB) | `models-bangla2/` (`t3_bangla_888k.safetensors`, `tokenizer.json` + shared base parts) |
 | App config | `audiobook_config.json` |
 
 Outside the folder, only two normal things: the `python3.12-venv` system package (via apt) and the pip download cache (`~/.cache/pip`, cleanable with `pip cache purge`).
@@ -92,13 +93,14 @@ Outside the folder, only two normal things: the `python3.12-venv` system package
 Every finished audio saves itself into the **`downloads/` folder** with a proper filename — no clicks needed to store it: `tts_<voice>_<lang>_<timestamp>.wav`, `<project>_complete.wav` copies, converted VC outputs. Each tab also reveals a **⬇️ Download button** with its file for one-click browser download.
 - Target voice embedded once (first 10 s used); temp files cleaned automatically
 
-### 🇧🇩 Bengali (Bangla) — 24th Language
-The stock multilingual model covers 23 languages but **not Bengali**. This app adds it via the [**BosonLab/chatterbox-bangla**](https://huggingface.co/BosonLab/chatterbox-bangla) fine-tune (MIT license, ~99 h Bengali speech, vocab extended 704→2530):
-- **Select `Bengali (Bangla)`** in any language dropdown — TTS tab, single/multi audiobooks, batch, regen all route automatically
-- **Lazy singleton**: downloads to `models-bangla/` on first Bengali use, then reuses (terminal shows `[BN]` lines with sizes/durations)
-- **Voice cloning works the same** — any ~10 s reference voice speaks Bengali
-- **How it fits**: the fine-tune targets the English-class TTS (precomputed-conds API), so a thin `BanglaTTS` adapter makes it a drop-in everywhere; `punc_norm` respects the Bengali dari (`।`); English `from_local` auto-sizes T3 to any checkpoint vocab
-- First Bengali click downloads ~2 GB once; failures fall back to multilingual with a terminal note (never a crash)
+### 🇧🇩 Bengali (Bangla) — 24th Language, two models
+The stock multilingual model covers 23 languages but **not Bengali**. This app adds it via **two** interchangeable fine-tunes of the ResembleAI Chatterbox English base, selectable as separate languages in any dropdown:
+- **`বাংলা (bn)`** → [**BosonLab/chatterbox-bangla**](https://huggingface.co/BosonLab/chatterbox-bangla) (MIT, ~99 h Bengali speech, vocab 704→2530) — downloads to `models-bangla/` on first use
+- **`বাংলা (EMTIAZZ) (bn2)`** → [**EMTIAZZ/chatterbox-bangla-tts**](https://huggingface.co/EMTIAZZ/chatterbox-bangla-tts) (MIT, vocab 704→4240, T3-only 888k fine-tune) — downloads the 2.16 GB T3 + tokenizer to `models-bangla2/`, reusing the shared base parts from `models-bangla/`
+- **Lazy singleton per model**: `[BN]`/`[BN2]` lines show download sizes and load times; picking `bn` vs `bn2` loads only that model (the other is evicted — strict one-at-a-time, now a 3-way rule: multilingual | bn | bn2)
+- **Voice cloning works the same** — any ~10 s reference voice speaks Bengali on both models; A/B the same text + voice across `bn` / `bn2` just by switching the dropdown
+- **How it fits**: both fine-tunes target the English-class TTS (precomputed-conds API), so thin `BanglaTTS`/`BanglaTTS2` adapters make them drop-in everywhere; the EMTIAZZ loader rebuilds T3 at vocab 4240 then loads the tuned weights (`t3.` prefix stripped)
+- First Bengali click downloads ~2 GB once (or ~2.2 GB if you choose `bn2`); failures fall back to multilingual with a terminal note (never a crash)
 
 ### 📱 Phone Access
 - **LAN link + QR in terminal** — server binds `0.0.0.0`; on launch the terminal prints `http://<lan-ip>:7860` plus a scannable QR code (same WiFi, trusted networks only)
