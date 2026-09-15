@@ -108,10 +108,7 @@ except ImportError as e:
     _is_bangla = None
     _evict_bangla = None
 
-# Second Bangla model (EMTIAZZ T3 fine-tune, vocab 4240) as its own language
-# entry in every dropdown. bn -> BosonLab, bn2 -> EMTIAZZ.
-if CHATTERBOX_AVAILABLE and "bn2" not in SUPPORTED_LANGUAGES:
-    SUPPORTED_LANGUAGES = {**SUPPORTED_LANGUAGES, "bn2": "বাংলা (EMTIAZZ)"}
+# Single Bangla model (BosonLab fine-tune). bn -> Bengali in every dropdown.
 
 def _evict_model(cache_dict, tag) -> bool:
     """Drop a cached model to free RAM. Returns True if anything was freed."""
@@ -163,7 +160,6 @@ def _resolve_model_for_language(model, language_id):
 DEFAULT_TEXTS = {
     "en": "Hello! This is a test of the text to speech system. How does my voice sound?",
     "bn": "আমি বাংলায় কথা বলতে পারি। এটি একটি পরীক্ষামূলক বাক্য।",
-    "bn2": "আমি বাংলায় কথা বলতে পারি। এটি একটি পরীক্ষামূলক বাক্য।",
     "ar": "مرحباً! هذا اختبار لنظام تحويل النص إلى كلام. كيف يبدو صوتي؟",
     "da": "Hej! Dette er en test af tekst-til-tale-systemet. Hvordan lyder min stemme?",
     "de": "Hallo! Dies ist ein Test des Text-to-Speech-Systems. Wie klingt meine Stimme?",
@@ -6326,7 +6322,7 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
                         seed_num = gr.Number(value=0, label="Random seed (0 for random)")
                         temp = gr.Slider(0.05, 5, step=.05, label="Temperature", value=.8)
                         with gr.Group():
-                            gr.HTML("<small>Bengali-only smart features (apply to <b>bn</b> / <b>bn2</b>):</small>")
+                            gr.HTML("<small>Bengali-only smart features (apply to <b>bn</b>):</small>")
                             use_prosody_ctx = gr.Checkbox(
                                 label="Sentence context carry-over (smoother Bangla prosody)",
                                 value=False,
