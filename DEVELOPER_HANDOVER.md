@@ -15,7 +15,7 @@ A CPU-only **text-to-speech audiobook studio** (Gradio web UI) built on Resemble
 |---|---|
 | `gradio_tts_app_audiobook.py` | EVERYTHING UI + orchestration: tab layouts, all event wiring, single/multi/batch/regen/combine flows, realtime engine (heartbeat, cancel/pause, ETA), model singletons, LAN/QR startup |
 | `src/audiobook/bangla.py` | Bengali support: `BanglaTTS` adapter, singleton loader (bosonlab), language router, evictor |
-| `src/audiobook/gemini_normalizer.py` | Optional Gemini Bangla normalizer: reads the prompt from `prompts/Bangla_Audiobook_Master_Language_Prompt_v3.txt` (or any custom path), auto-chunks long input ≤30k chars, temp 0.0, safe fallback; `set_prompt_file()`/`get_system_prompt()` swap prompts live |
+| `src/audiobook/gemini_normalizer.py` | Optional Gemini Bangla normalizer: reads the prompt from `prompts/Bangla_Audiobook_Master_Language_Prompt_v4.txt` (or any custom path), auto-chunks long input ≤30k chars, temp 0.0, safe fallback; `set_prompt_file()`/`get_system_prompt()` swap prompts live |
 | `prompts/` | Canonical normalization prompt files (git-tracked, editable without code changes) |
 | `src/audiobook/processing.py` | Text chunking (sentence/pause/line-break aware), audio save helpers |
 | `src/audiobook/{models,project_management,voice_management,config,audio_processing}.py` | Refactor-library modules (mostly **unused** by the running app — see §6) |

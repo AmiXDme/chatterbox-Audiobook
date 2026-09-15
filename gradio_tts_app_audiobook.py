@@ -6248,7 +6248,7 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
                                         info="Kept in memory only, never saved/logged")
             gemini_test_btn = gr.Button("Test", size="sm")
         with gr.Row():
-            default_prompt = str(Path(__file__).resolve().parent / "prompts" / "Bangla_Audiobook_Master_Language_Prompt_v3.txt")
+            default_prompt = str(Path(__file__).resolve().parent / "prompts" / "Bangla_Audiobook_Master_Language_Prompt_v4.txt")
             gemini_prompt_path = gr.Textbox(label="Normalization prompt file (.txt) — optional",
                                             value=default_prompt,
                                             placeholder="path/to/your_prompt.txt",

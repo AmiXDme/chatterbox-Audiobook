@@ -975,15 +975,15 @@ BANGLA_PAUSE_SECONDS = {
 _BN0_99 = {
     0: 'শূন্য', 1: 'এক', 2: 'দুই', 3: 'তিন', 4: 'চার', 5: 'পাঁচ', 6: 'ছয়',
     7: 'সাত', 8: 'আট', 9: 'নয়', 10: 'দশ', 11: 'এগারো', 12: 'বারো',
-    13: 'তেরো', 14: 'চৌদ্দ', 15: 'পনেরো', 16: 'ষোলো', 17: 'সতেরো',
+    13: 'তেরো', 14: 'চৌদ্দ', 15: 'পনেরো', 16: 'ষোল', 17: 'সতেরো',
     18: 'আঠারো', 19: 'উনিশ', 20: 'বিশ', 21: 'একুশ', 22: 'বাইশ', 23: 'তেইশ',
-    24: 'চব্বিশ', 25: 'পঁচিশ', 26: 'ছাব্বিশ', 27: 'সাতাশ', 28: 'আঠাশ',
+    24: 'চব্বিশ', 25: 'পঁচিশ', 26: 'ছাব্বিশ', 27: 'সাতাশ', 28: 'আটাশ',
     29: 'ঊনত্রিশ', 30: 'ত্রিশ', 31: 'একত্রিশ', 32: 'বত্রিশ', 33: 'তেত্রিশ',
     34: 'চৌত্রিশ', 35: 'পঁয়ত্রিশ', 36: 'ছত্রিশ', 37: 'সাঁইত্রিশ',
     38: 'আটত্রিশ', 39: 'ঊনচল্লিশ', 40: 'চল্লিশ', 41: 'একচল্লিশ',
     42: 'বিয়াল্লিশ', 43: 'তেতাল্লিশ', 44: 'চুয়াল্লিশ', 45: 'পঁয়তাল্লিশ',
     46: 'ছেচল্লিশ', 47: 'সাতচল্লিশ', 48: 'আটচল্লিশ', 49: 'ঊনপঞ্চাশ',
-    50: 'পঞ্চাশ', 51: 'একান্ন', 52: 'বাহান্ন', 53: 'তেপ্পান্ন', 54: 'চুয়ান্ন',
+    50: 'পঞ্চাশ', 51: 'একান্ন', 52: 'বাহান্ন', 53: 'তিপ্পান্ন', 54: 'চুয়ান্ন',
     55: 'পঞ্চান্ন', 56: 'ছাপ্পান্ন', 57: 'সাতান্ন', 58: 'আটান্ন', 59: 'ঊনষাট',
     60: 'ষাট', 61: 'একষট্টি', 62: 'বাষট্টি', 63: 'তেষট্টি', 64: 'চৌষট্টি',
     65: 'পঁয়ষট্টি', 66: 'ছেষট্টি', 67: 'সাতষট্টি', 68: 'আটষট্টি',
@@ -998,6 +998,25 @@ _BN0_99 = {
 _BN_HUND = ['', 'একশো', 'দুইশো', 'তিনশো', 'চারশো', 'পাঁচশো', 'ছয়শো', 'সাতশো', 'আটশো', 'নয়শো']
 _BN0_9 = [_BN0_99[i] for i in range(10)]
 _BN_DIGIT_RE = re.compile(r'[0-9০-৯]+(?:[,.][0-9০-৯]+)*')
+
+# Common Bengali words that genuinely belong (function words, pronouns, high-
+# frequency verbs/nouns, polite forms). If the tokenizer reports them OOV they
+# are usually a corpus artifact -- never letter-space them into garble.
+_BN_COMMON = frozenset("""
+আমি তুমি আপনি সে তিনি আমরা তোমরা আপনারা তারা ইনি উনি এরা ওরা
+এই ওই সেই যে যা কে কী কেউ কিছু কার কাদের কাকে কীসে কীভাবে কেন কখন কোথায়
+এখানে সেখানে ওখানে এখন তখন আবার পরে আগে প্রথম শেষ শেষে শুরু মাঝে মধ্যে সামনে পেছনে উপরে নিচে ভিতরে সাথে জন্য হয়ে হয়ে যায় গেল করে করেছে করছি করছেন হবে হল হয় হয়নি হয়েছে হচ্ছে
+আছে ছিল ছিলাম আছে ছিলাম নেই হয়েছিল
+না ও তো তাই সত্যি ঠিক আছে হ্যাঁ হয় হুম ঠিক নয় কই গিয়ে নিয়ে করে দিয়ে বেশি কম একটু অনেক খুব মোটে সত্যিই মনে কথা বলে বলল বললেন বলেন বলেছেন শুনে শোনা দেখে দেখা পড়ে পড়ছি লিখে লিখছি চলছে চলল গেল এল এলো দাও নাও নাওয়া খেলে খুলে দিয়ে নিয়ে হয়ে থাকা থাকবে থাকুন
+সে দিন রাত সকাল দুপুর বিকাল সন্ধ্যা ভোর বেলা বছর মাস সপ্তাহ আবার কাল আজ কাল পরশু
+প্রশ্ন উত্তর কথা গল্প বই লেখা কথা নাম ঠিকানা বাড়ি শহর গ্রাম দেশ ভাষা মানুষ জীবন মন প্রাণ ভালোবাসা
+ভালো খারাপ সুন্দর বড় ছোট নতুন পুরনো দূর নিকট সোজা বাঁকা সাদা কালো লাল হলুদ সবুজ নীল
+এক দুই তিন কিন্তু এবং আর বা নাকি যেন মনে হয় যেন কী
+""".split())
+
+# Extra honorifics / very common particles never letter-spaced regardless.
+_BN_COMMON |= frozenset(['জনাব', 'জনাবা', 'শ্রী', 'শ্রীমতি', 'ডা', 'টি', 'টির',
+                          'এসএমএস', 'ঢাকা', 'কলকাতা'])
 
 
 def is_bangla_text(text):
@@ -1095,35 +1114,269 @@ def _bn_num_words(n):
     return ' '.join(parts) if parts else _BN0_99[n]
 
 
-def bangla_digit_normalize(text):
-    """Deterministic digit -> spoken Bangla, Indian (lakh/crore) grouping.
+_BN_MONTHS = ['', 'জানুয়ারি', 'ফেব্রুয়ারি', 'মার্চ', 'এপ্রিল', 'মে', 'জুন',
+              'জুলাই', 'আগস্ট', 'সেপ্টেম্বর', 'অক্টোবর', 'নভেম্বর', 'ডিসেম্বর']
 
-    Runs BEFORE any Gemini pass so the language model sees letters, not digit
-    shapes (both ASCII 123 and Bangla ১২৩). Pure numbers with a leading zero
-    (phone numbers, codes) are read digit-by-digit like a narrator would.
+_BN_CURRENCY_NAMES = {
+    '৳': 'টাকা', 'Tk': 'টাকা', 'TK': 'টাকা', 'BDT': 'টাকা',
+    '₹': 'রুপি', '$': 'ডলার', '€': 'ইউরো', '£': 'পাউন্ড', '¥': 'ইয়েন',
+}
+_BN_COIN_NAMES = {
+    'টাকা': 'পয়সা', 'রুপি': 'পয়সা', 'ডলার': 'সেন্ট',
+    'ইউরো': 'সেন্ট', 'পাউন্ড': 'পেনি', 'ইয়েন': 'সেন',
+}
+
+_BN_ACRONYM = {
+    'API': 'এপিআই', 'GPU': 'জিপিইউ', 'CPU': 'সিপিইউ', 'AI': 'এআই',
+    'TTS': 'টি টি এস', 'ASR': 'এ এস আর', 'NID': 'এনআইডি', 'BIN': 'বিন',
+    'NIN': 'এন আই এন', 'USB': 'ইউএসবি', 'PDF': 'পিডিএফ', 'HTML': 'এইচটিএমএল',
+    'URL': 'ইউআরএল', 'RAM': 'র্যাম', 'TV': 'টিভি', 'BBC': 'বিবিসি',
+    'MBBS': 'এমবিবিএস', 'MD': 'এমডি', 'GPS': 'জিপিএস', 'ATM': 'এটিএম',
+    'SMS': 'এসএমএস', 'SIM': 'সিম', 'OTP': 'ওটিপি', 'PIN': 'পিন',
+}
+
+_BN_UNIT = {
+    'km/h': 'কিলোমিটার প্রতি ঘণ্টা', 'km': 'কিলোমিটার', 'cm': 'সেন্টিমিটার',
+    'mm': 'মিলিমিটার', 'kg': 'কিলোগ্রাম', 'mg': 'মিলিগ্রাম', 'g': 'গ্রাম',
+    'ml': 'মিলিলিটার', 'L': 'লিটার', 'l': 'লিটার', 's': 'সেকেন্ড',
+    'min': 'মিনিট', 'hr': 'ঘণ্টা', 'h': 'ঘণ্টা', 'kcal': 'কিলোক্যালরি',
+    'KB': 'কিলোবাইট', 'MB': 'মেগাবাইট', 'GB': 'গিগাবাইট', 'TB': 'টেরাবাইট',
+    '°C': 'ডিগ্রি সেলসিয়াস', '℃': 'ডিগ্রি সেলসিয়াস', '°F': 'ডিগ্রি ফারেনহাইট',
+    '%': 'শতাংশ',
+}
+
+_BN_DIG_AS = str.maketrans('০১২৩৪৫৬৭৮৯', '0123456789')
+
+
+def _bn_to_ascii_digits(s):
+    """০-৯ -> 0-9, keep every other character untouched."""
+    return s.translate(_BN_DIG_AS)
+
+
+def _bn_read_amount(amount_str):
+    """'5' | '৫,০০০' | '3.14' -> spoken Bangla (মাইনাস for a - prefix)."""
+    sign = ''
+    if amount_str.startswith('-'):
+        sign = 'মাইনাস '
+        amount_str = amount_str[1:]
+    whole, dot, frac = amount_str.partition('.')
+    whole_d = _bn_to_ascii_digits(whole).replace(',', '')
+    if frac:
+        frac_d = _bn_to_ascii_digits(frac).replace(',', '')
+        words = [sign + _bn_num_words(int(whole_d)), 'দশমিক']
+        for ch in frac_d:
+            words.append(_BN0_9[int(ch)])
+        return ' '.join(words)
+    # Leading-zero codes (phones, roll numbers) read digit-by-digit like a
+    # narrator; a single "0" is just শূন্য.
+    if len(whole_d) > 1 and whole_d.startswith('0'):
+        return sign + ' '.join(_BN0_9[int(ch)] for ch in whole_d)
+    return sign + _bn_num_words(int(whole_d))
+
+
+def _bn_year_words(year):
+    """Narrated year near সালে/সাল: 1987 -> উনিশশো সাতাশি, 2026 -> দুই হাজার ছাব্বিশ."""
+    if 1100 <= year <= 1999:
+        century = year // 100
+        rest = year % 100
+        base = _BN0_99[century] + 'শো'
+        return base + ((' ' + _BN0_99[rest]) if rest else '')
+    if 2000 <= year <= 2099:
+        rest = year % 100
+        base = 'দুই হাজার'
+        return base + ((' ' + _BN0_99[rest]) if rest else '')
+    return _bn_num_words(year)
+
+
+def _bn_ordinal(num, suffix):
+    """Speech form of ordinal suffixes: ৪র্থ, ২য়, ১ম, ৫ই, ৩রা, ৪ঠা, Nতম."""
+    basic = {1: 'প্রথম', 2: 'দ্বিতীয়', 3: 'তৃতীয়', 4: 'চতুর্থ', 5: 'পঞ্চম',
+             6: 'ষষ্ঠ', 7: 'সপ্তম', 8: 'অষ্টম', 9: 'নবম', 10: 'দশম'}
+    date_form = {1: 'পহেলা', 2: 'দোসরা', 3: 'তেসরা', 4: 'চৌঠা'}
+    n = int(_bn_to_ascii_digits(num))
+    if suffix == 'ম':
+        return basic.get(n, _bn_num_words(n) + 'তম')
+    if suffix == 'র্থ':
+        return basic.get(n, _bn_num_words(n) + 'র্থ')
+    if suffix in ('য়', 'তম'):
+        return basic.get(n, _bn_num_words(n) + 'তম')
+    if suffix in ('লা', 'রা', 'ঠা', 'ই'):
+        return date_form.get(n, _bn_num_words(n) + 'ই')
+    return _bn_num_words(n)
+
+
+def _bn_time_words(hour, minute, has_am_pm, am_pm):
+    """Clock phrase: 7:30 -> সাড়ে সাতটা, 1:30 -> দেড়টা, 6:05 -> ছয়টা পাঁচ মিনিট."""
+    h = int(_bn_to_ascii_digits(str(hour)))
+    m = int(_bn_to_ascii_digits(str(minute)))
+    if not (0 <= h <= 24 and 0 <= m <= 59):
+        return None
+    h12 = h % 12 or 12
+    if h == 0:
+        h12 = 12
+    if m == 0:
+        phrase = _bn_num_words(h12) + 'টা'
+    elif m == 15:
+        phrase = 'সোয়া ' + _bn_num_words(h12) + 'টা'
+    elif m == 30 and h12 == 1:
+        phrase = 'দেড়টা'
+    elif m == 30:
+        phrase = 'সাড়ে ' + _bn_num_words(h12) + 'টা'
+    elif m == 45:
+        nxt = (h % 12) + 1
+        phrase = 'পৌনে ' + _bn_num_words(nxt) + 'টা'
+    else:
+        phrase = _bn_num_words(h12) + ' ঘণ্টা ' + _bn_num_words(m) + ' মিনিট'
+    if not has_am_pm:
+        return phrase
+    if am_pm and am_pm.lower() in ('am', 'pm'):
+        if h < 6:
+            daypart = 'ভোরে'
+        elif h < 12:
+            daypart = 'সকালে'
+        elif h < 17:
+            daypart = 'দুপুরে'
+        elif h < 20:
+            daypart = 'সন্ধ্যায়'
+        else:
+            daypart = 'রাতে'
+    else:
+        daypart = {'সকাল': 'সকালে', 'বিকাল': 'বিকালে', 'সন্ধ্যা': 'সন্ধ্যায়',
+                   'রাত': 'রাতে'}.get(am_pm, '')
+    return (daypart + ' ' + phrase) if daypart else phrase
+
+
+def bangla_normalize_text(text):
+    """Deterministic Bangla text normalization (stage 1, superset of digits).
+
+    Runs BEFORE any Gemini pass so the language model sees letters, never digit
+    shapes. Covers: percentages, currencies (৳ ₹ $ € £ ¥ Tk/BDT), clock times
+    (সাড়ে/সোয়া/পৌনে/দেড় + 24h folding), dates (dd/mm/yyyy incl. Bangla
+    digits), ordinals (৪র্থ/২য়/৩রা/৫ই), context years (২০২৬ সালে), units
+    (km/kg/L/°C...), decimals (৩.১৪ -> তিন দশমিক এক চার), lakh/crore integer
+    grouping, leading-zero phones read digit-by-digit, negatives, and a small
+    trusted acronym dictionary. Forms match the Master-Prompt ruleset exactly
+    (ষোল/আটাশ/তিপ্পান্ন canonical). Never raises.
     """
     if not text or not is_bangla_text(text):
         return text
+    text = unicode_repair_bangla(text)
 
-    def _repl(m):
-        digits = m.group(0)
-        out = []
-        for ch in digits:
-            if ch in (',', '.'):
-                continue
-            if '0' <= ch <= '9':
-                out.append(ch)
-            else:
-                out.append(str('০১২৩৪৫৬৭৮৯'.index(ch)))
-        digits = ''.join(out)
-        s = digits.lstrip('0')
-        if not s:
-            return _BN0_99[0]
-        if digits.startswith('0'):
-            return ' '.join(_BN0_9[int(ch)] for ch in digits)
-        return _bn_num_words(int(s))
+    for key, rep in _BN_ACRONYM.items():
+        text = re.sub(r'(?<![A-Za-z])' + key + r'(?![A-Za-z])', rep, text)
 
-    return _BN_DIGIT_RE.sub(_repl, text)
+    text = re.sub(r'([0-9০-৯]+)\s*%', lambda m: _bn_read_amount(m.group(1)) + ' শতাংশ', text)
+
+    def _cur(m):
+        amt, sym, suf = m.group('amt'), m.group('sym'), m.group('cur')
+        if sym:
+            cur = _BN_CURRENCY_NAMES.get(sym, 'টাকা')
+        else:
+            cur = _BN_CURRENCY_NAMES.get(suf, 'টাকা')
+        frac = ''
+        whole_s = amt
+        if '.' in amt:
+            whole_s, _, frac = amt.partition('.')
+        whole_i = _bn_to_ascii_digits(whole_s).replace(',', '')
+        n = int(whole_i)
+        coin = _BN_COIN_NAMES.get(cur, 'পয়সা')
+        if frac:
+            two = (_bn_to_ascii_digits(frac).replace(',', '') + '00')[:2]
+            p = int(two)
+            if p:
+                return (_bn_read_amount(whole_s) + ' ' + cur + ' ' +
+                        _BN0_99[p] + ' ' + coin)
+            return _bn_read_amount(whole_s) + ' ' + cur
+        if n == 0:
+            return _BN0_99[0] + ' ' + cur
+        return _bn_num_words(n) + ' ' + cur
+
+    text = re.sub(
+        r'(?P<sym>৳|₹|Tk|TK|BDT|\$|€|£|¥)\s*(?P<amt>[0-9০-৯]+(?:[,.][0-9০-৯]+)*)'
+        r'|(?P<amt2>[0-9০-৯]+(?:\.[0-9০-৯]+)?)\s*(?P<cur>টাকা|৳|Tk|TK|BDT)\b',
+        lambda m: _cur(m) if (m.group('amt') or m.group('amt2')) else m.group(0),
+        text,
+    )
+
+    text = re.sub(
+        r'(?P<h>[0-9০-৯]{1,2}):(?P<m>[0-9০-৯]{1,2})(?::[0-9০-৯]{1,2})?'
+        r'(?:(?P<ap> ?(?:AM|PM|am|pm|সকাল|বিকাল|সন্ধ্যা|রাত)))?',
+        lambda m: (lambda p, ap: p if p else m.group(0))(
+            _bn_time_words(m.group('h'), m.group('m'), bool((m.group('ap') or '').strip()),
+                           (m.group('ap') or '').strip()),
+            (m.group('ap') or '').strip()),
+        text,
+    )
+
+    text = re.sub(
+        r'([0-9০-৯]{1,2})(ম|য়|র্থ|লা|রা|ঠা|ই|তম)',
+        lambda m: _bn_ordinal(m.group(1), m.group(2)),
+        text,
+    )
+
+    def _date(m):
+        day = int(_bn_to_ascii_digits(m.group('d')))
+        mon = int(_bn_to_ascii_digits(m.group('mo')))
+        if not (1 <= day <= 31 and 1 <= mon <= 12):
+            return m.group(0)
+        base = _bn_num_words(day) + ' ' + _BN_MONTHS[mon]
+        if m.group('y'):
+            yr = int(_bn_to_ascii_digits(m.group('y')))
+            if yr < 70:
+                yr += 2000
+            elif yr < 100:
+                yr += 1900
+            return base + ' ' + _bn_year_words(yr)
+        return base
+
+    # Slash dates may omit the year; dot/dash forms LOOK like decimals/ranges so
+    # they only count as dates when a year is present (no false 3.14 -> 3rd June).
+    text = re.sub(
+        r'(?P<d>[0-9০-৯]{1,2})/(?P<mo>[0-9০-৯]{1,2})(?:/(?P<y>[0-9০-৯]{2,4}))?',
+        _date, text,
+    )
+    text = re.sub(
+        r'(?P<d>[0-9০-৯]{1,2})[.\-](?P<mo>[0-9০-৯]{1,2})[.\-](?P<y>[0-9০-৯]{2,4})',
+        _date, text,
+    )
+
+    # Ranges: ৫-৭ জন -> পাঁচ থেকে সাত জন
+    text = re.sub(
+        r'(?P<a>[0-9০-৯]+)\s*[-–—]\s*(?P<b>[0-9০-৯]+)',
+        lambda m: (_bn_read_amount(m.group('a')) + ' থেকে ' + _bn_read_amount(m.group('b'))),
+        text,
+    )
+
+    def _yr(m):
+        yr = int(_bn_to_ascii_digits(m.group('n')))
+        return _bn_year_words(yr) + m.group('ctx')
+
+    text = re.sub(
+        r'(?P<n>[0-9০-৯]+)(?P<ctx>\s*(?:সাল|সালে|সন|সনে|খ্রিস্টাব্দ|খ্রিস্টাব্দে))',
+        lambda m: _bn_year_words(int(_bn_to_ascii_digits(m.group('n')))) + m.group('ctx'),
+        text,
+    )
+
+    def _unit(m):
+        return _bn_read_amount(m.group('amt')) + ' ' + _BN_UNIT[m.group('u')]
+
+    text = re.sub(
+        r'(?P<amt>-?(?:[0-9০-৯]+(?:[.,][0-9০-৯]+)*))\s*'
+        r'(?P<u>km/h|km|cm|mm|mg|kg|ml|kcal|KB|MB|GB|TB|min|°C|℃|°F|L|l|s|g|m|h)\b',
+        _unit, text,
+    )
+
+    text = re.sub(
+        r'(?<![A-Za-z])-?(?:[0-9০-৯]+(?:,[0-9০-৯]{1,3})*(?:\.[0-9০-৯]+)?)(?![A-Za-z])',
+        lambda m: _bn_read_amount(m.group(0)), text,
+    )
+
+    return text
+
+
+def bangla_digit_normalize(text):
+    """Backwards-compatible name; see bangla_normalize_text (full stage 1)."""
+    return bangla_normalize_text(text)
 
 
 def bangla_pause_duration(cue):
@@ -1159,6 +1412,10 @@ def letterspace_unknown_bangla(model, text, language_id="bn", max_words=8):
 
     candidates = []
     for w in _bangla_letter_runs(text):
+        if w in _BN_COMMON:
+            continue
+        if len(list(_clusters(w))) < 2:
+            continue
         try:
             try:
                 ids = tok.encode(w, language_id=language_id)

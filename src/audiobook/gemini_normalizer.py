@@ -43,7 +43,7 @@ def _live(**kw):
     GEMINI_LIVE["ts"] = time.time()
 
 # Where the project keeps its canonical normalization prompt.
-DEFAULT_PROMPT_FILE = Path(__file__).resolve().parent.parent.parent / "prompts" / "Bangla_Audiobook_Master_Language_Prompt_v3.txt"
+DEFAULT_PROMPT_FILE = Path(__file__).resolve().parent.parent.parent / "prompts" / "Bangla_Audiobook_Master_Language_Prompt_v4.txt"
 
 # Compact fallback used only when no prompt file is readable (never crashes).
 _FALLBACK_PROMPT = """You are a Bangla (Bengali) audiobook text normalizer. You convert "raw" Bangla text into spoken Bangla text so a text-to-speech voice reads it correctly.
@@ -111,7 +111,7 @@ def get_system_prompt() -> str:
             if not text:
                 continue
             _prompt_cache.update({"mtime": mtime, "text": text})
-            src = "custom prompt file" if i == 0 else "project Master-Prompt v3"
+            src = "custom prompt file" if i == 0 else "project Master-Prompt"
             tag = "[GEMINI]" if i == 1 else "[GEMINI]"
             print(f"{tag} 📜 Rules loaded from {src}: {Path(p).name} ({len(text)} chars)", flush=True)
             _live(step="Rules ready", detail=f"{src}: {Path(p).name} • {len(text)} rule-chars")
