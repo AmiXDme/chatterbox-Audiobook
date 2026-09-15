@@ -26,6 +26,22 @@ MODEL = "gemini-2.5-flash"
 ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
 MAX_INPUT_CHARS = 30000
 
+# Live progress shown in the UI ("what is Gemini doing right now") + terminal.
+# The streaming UI panel only renders when 'active' is True; every step bumps
+# 'ts' so the poller sees a change.
+GEMINI_LIVE = {
+    "active": False, "label": "", "step": "", "detail": "",
+    "chunk": 0, "total": 0, "chars": 0, "elapsed": 0.0,
+    "latency": 0.0, "error": "", "done": False, "ts": 0.0,
+}
+
+_gl_lock_ok = True
+
+
+def _live(**kw):
+    GEMINI_LIVE.update(kw)
+    GEMINI_LIVE["ts"] = time.time()
+
 # Where the project keeps its canonical normalization prompt.
 DEFAULT_PROMPT_FILE = Path(__file__).resolve().parent.parent.parent / "prompts" / "Bangla_Audiobook_Master_Language_Prompt_v3.txt"
 
@@ -80,7 +96,7 @@ def get_system_prompt() -> str:
     Never raises when a file is unreadable — falls back to the last good prompt.
     """
     candidates = [_ACTIVE_PROMPT_FILE.get("path") or None, str(DEFAULT_PROMPT_FILE)]
-    for fp in candidates:
+    for i, fp in enumerate(candidates):
         if not fp:
             continue
         try:
@@ -89,15 +105,21 @@ def get_system_prompt() -> str:
                 continue
             mtime = p.stat().st_mtime
             if _prompt_cache["text"] is not None and _prompt_cache["mtime"] == mtime and str(p) == _ACTIVE_PROMPT_FILE.get("path"):
+                _live(step="Rules ready", detail=f"using cached {Path(p).name} (unchanged)")
                 return _prompt_cache["text"]
             text = p.read_text(encoding="utf-8").strip()
             if not text:
                 continue
             _prompt_cache.update({"mtime": mtime, "text": text})
+            src = "custom prompt file" if i == 0 else "project Master-Prompt v3"
+            tag = "[GEMINI]" if i == 1 else "[GEMINI]"
+            print(f"{tag} 📜 Rules loaded from {src}: {Path(p).name} ({len(text)} chars)", flush=True)
+            _live(step="Rules ready", detail=f"{src}: {Path(p).name} • {len(text)} rule-chars")
             return text
         except Exception as e:
             print(f"[GEMINI] Prompt file unreadable ({fp}: {e}) — using fallback", flush=True)
             continue
+    _live(step="Rules ready", detail="built-in fallback prompt (no file readable)")
     return _FALLBACK_PROMPT
 
 
@@ -148,6 +170,8 @@ def _call_gemini(prompt: str, api_key: str, timeout: float = 90.0) -> str:
         method="POST",
     )
     last_err = None
+    t0 = time.time()
+    _live(step=f"Sending {len(prompt)} chars to {MODEL}…", latency=0.0)
     for attempt in range(2):  # one automatic retry on transient failure
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -162,15 +186,20 @@ def _call_gemini(prompt: str, api_key: str, timeout: float = 90.0) -> str:
             last_err = RuntimeError(f"Gemini API HTTP {e.code}: {detail}")
         except urllib.error.URLError as e:
             last_err = RuntimeError(f"Gemini network error: {e.reason}")
+        _live(step=f"Retry {attempt + 1} after API error ({type(last_err).__name__})…")
     else:
+        _live(error=str(last_err), step="Failed")
         raise last_err
 
     candidates = data.get("candidates") or []
     if not candidates:
+        _live(error="no candidates from API", step="Failed")
         raise RuntimeError(f"Gemini returned no candidates: {str(data)[:200]}")
     parts = candidates[0].get("content", {}).get("parts") or []
     if not parts or not parts[0].get("text"):
+        _live(error="empty reply from API", step="Failed")
         raise RuntimeError("Gemini returned empty text")
+    _live(latency=round(time.time() - t0, 1), step="Gemini replied")
     return parts[0]["text"]
 
 
@@ -187,17 +216,38 @@ def gemini_normalize(raw_text: str, api_key: str, model: str = MODEL, timeout: f
     if not raw_text or not raw_text.strip():
         raise RuntimeError("Empty text")
     chunks = _chunk_text(raw_text, MAX_INPUT_CHARS)
-    if len(chunks) <= 1:
-        result = _call_gemini(raw_text, api_key, timeout=timeout).strip()
-        if not result:
-            raise RuntimeError("Gemini returned empty text")
-        return result
-    out = []
     total = len(chunks)
-    for i, chunk in enumerate(chunks, 1):
-        result = _call_gemini(chunk, api_key, timeout=timeout).strip()
-        if not result:
-            raise RuntimeError(f"Gemini returned empty text for chunk {i}/{total}")
-        print(f"[GEMINI] chunk {i}/{total} → {len(result)} chars", flush=True)
-        out.append(result)
-    return "".join(out)
+    _live(active=True, label="Gemini normalization", step="Preparing", detail="",
+          chunk=0, total=total, chars=len(raw_text), elapsed=0.0, latency=0.0,
+          error="", done=False)
+    t_all = time.time()
+
+    def _finish(out_text, **kw):
+        _live(active=False, done=True, elapsed=round(time.time() - t_all, 1),
+              step="Done — normalized text ready for TTS", detail=kw.get("detail", ""))
+        return out_text
+
+    try:
+        if total <= 1:
+            _live(step=f"Sending {len(raw_text)} chars to {model}…", detail="single chunk")
+            result = _call_gemini(raw_text, api_key, timeout=timeout).strip()
+            if not result:
+                raise RuntimeError("Gemini returned empty text")
+            print(f"[GEMINI] ✅ {len(raw_text)} → {len(result)} chars in {GEMINI_LIVE['latency']}s", flush=True)
+            return _finish(result)
+        out = []
+        for i, chunk in enumerate(chunks, 1):
+            _live(step=f"Chunk {i}/{total} • sending {len(chunk)} chars to {model}…",
+                  chunk=i, total=total)
+            t_c = time.time()
+            result = _call_gemini(chunk, api_key, timeout=timeout).strip()
+            if not result:
+                raise RuntimeError(f"Gemini returned empty text for chunk {i}/{total}")
+            lat = GEMINI_LIVE["latency"]
+            print(f"[GEMINI] ✅ chunk {i}/{total}: {len(chunk)} chars → {len(result)} chars in {lat}s", flush=True)
+            _live(step=f"Chunk {i}/{total} done in {lat}s", chunk=i, detail=f"{len(chunk)}→{len(result)} chars")
+            out.append(result)
+        return _finish("".join(out), detail=f"{total} chunks joined")
+    except Exception as e:
+        _live(active=False, error=str(e), step="Failed — using original text")
+        raise

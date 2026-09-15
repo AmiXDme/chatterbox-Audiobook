@@ -99,6 +99,7 @@ try:
     from src.audiobook.bangla import resolve_model_for_language as _bangla_resolve
     from src.audiobook.bangla import is_bangla as _is_bangla
     from src.audiobook.bangla import evict_bangla_model as _evict_bangla
+    from src.audiobook.gemini_normalizer import GEMINI_LIVE as _GL
     BANGLA_AVAILABLE = True
 except ImportError as e:
     print(f"Warning: BanglaTTS not available - {e}")
@@ -3110,6 +3111,39 @@ def validate_dropdown_voice_assignments(text_content, voice_library_path, projec
 
 # Custom CSS for better styling - Fixed to preserve existing UI while targeting white backgrounds
 css = """
+.gemini-live {
+    border: 1px solid #e2c56b;
+    background: #fffaf0;
+    border-radius: 6px;
+    padding: 10px 12px;
+    font-size: 13.5px;
+    line-height: 1.5;
+    min-height: 20px;
+    word-break: break-word;
+}
+
+.gemini-live-dot {
+    display: inline-block;
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    margin-right: 6px;
+    background: #b9b9b9;
+    vertical-align: middle;
+}
+
+.gemini-live.active .gemini-live-dot {
+    background: #f5b301;
+    animation: gemini-blink 1.2s ease-in-out infinite;
+}
+
+@keyframes gemini-blink {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.25; }
+}
+
+.gemini-live.err { border-color: #e67e22; background: #fdf3ec; }
+
 .voice-card {
     border: 1px solid #ddd;
     border-radius: 8px;
@@ -6125,6 +6159,43 @@ def create_batch_audiobook(
 # END BATCH PROCESSING FUNCTIONS
 # =============================================================================
 
+def _render_gemini_live() -> str:
+    """HTML for the 'what is Gemini doing right now' panel."""
+    gl = _GL
+    e = _html_escape = (lambda s: (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+    if gl.get("error"):
+        return (f"<div class='gemini-live err'><span class='gemini-live-dot'></span>"
+                f"<b>Gemini failed</b> — {e(gl.get('error'))} — falling back to your original text</div>")
+    if gl.get("done"):
+        return (f"<div class='gemini-live'><span class='gemini-live-dot'></span>"
+                f"<b>{e(gl.get('step') or 'Done')}</b> in {gl.get('elapsed', 0)}s: {e(gl.get('detail') or '')}</div>")
+    if not gl.get("active"):
+        return ("<div class='gemini-live'><span class='gemini-live-dot'></span>"
+                "Idle — each step Gemini performs will appear here live</div>")
+    step = e(gl.get("step") or "")
+    detail = e(gl.get("detail") or "")
+    chunk, total = gl.get("chunk", 0), gl.get("total", 0)
+    seg = f" | chunk <b>{chunk}/{total}</b>" if total > 1 and chunk else ""
+    lat = gl.get("latency", 0.0)
+    lat_txt = f" | reply in <b>{lat}s</b>" if lat else ""
+    return (f"<div class='gemini-live active'><span class='gemini-live-dot'></span>"
+            f"<b>{step}</b>{seg} {detail}{lat_txt}</div>")
+
+
+def _gemini_live_stream():
+    """Fed to demo.load: yields the live panel only when its HTML actually changes."""
+    import time as _t
+    last = None
+    while True:
+        try:
+            out = _render_gemini_live()
+        except Exception:
+            out = ""
+        if out and out != last:
+            yield (out, out)
+        last = out
+        _t.sleep(1.0)
+
 with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
     print("[STARTUP] Building Gradio UI (thousands of components, terminal quiet)...", flush=True)
     model_state = gr.State(None)
@@ -6187,6 +6258,7 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
                                             placeholder="path/to/your_prompt.txt",
                                             info="Edit the file anytime; changes apply on the next Generate")
         gemini_status = gr.Markdown("🤖 AI normalization: OFF")
+        gemini_live_status = gr.HTML(_render_gemini_live(), label="Gemini live activity")
         gemini_enable.change(fn=_gemini_set_enabled, inputs=[gemini_enable], outputs=[gemini_status])
         gemini_api_key.change(fn=_gemini_set_key, inputs=[gemini_api_key], outputs=[])
         gemini_prompt_path.change(fn=_gemini_set_prompt_path, inputs=[gemini_prompt_path], outputs=[])
@@ -6269,6 +6341,7 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
                     with gr.Row():
                         run_btn = gr.Button("🎵 Generate Speech", variant="primary", size="lg")
                         refresh_voices_btn = gr.Button("🔄 Refresh Voices", size="sm")
+                    tts_gemini_live = gr.HTML(_render_gemini_live(), label="Gemini live activity")
 
                 with gr.Column():
                     audio_output = gr.Audio(label="Generated Audio")
@@ -8458,6 +8531,11 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
         fn=force_refresh_single_project_dropdown,
         inputs=[],
         outputs=multi_previous_project_dropdown
+    )
+    demo.load(
+        fn=_gemini_live_stream,
+        inputs=[],
+        outputs=[gemini_live_status, tts_gemini_live]
     )
     demo.load(
         fn=force_refresh_single_project_dropdown,
