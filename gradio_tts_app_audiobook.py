@@ -866,8 +866,14 @@ def _find_unk_words(model, text, language_id="en"):
         unk_id = vocab.get("[UNK]")
         if unk_id is None:
             return []
+        is_bn = str(language_id or "").lower().startswith("bn")
+        if is_bn:
+            from src.audiobook.processing import bangla_word_segments
+            words = bangla_word_segments(text)
+        else:
+            words = [w for w in text.split() if w]
         bad = []
-        for w in text.split():
+        for w in words:
             try:
                 try:
                     ids = tok.encode(w, language_id=language_id)
@@ -884,7 +890,7 @@ def _find_unk_words(model, text, language_id="en"):
     except Exception:
         return []
 
-def generate(model, text, audio_prompt_path, exaggeration, temperature, seed_num, cfgw, min_p=0.05, top_p=1.0, repetition_penalty=1.2, language_id="en", progress=gr.Progress(track_tqdm=True)):
+def generate(model, text, audio_prompt_path, exaggeration, temperature, seed_num, cfgw, min_p=0.05, top_p=1.0, repetition_penalty=1.2, language_id="en", use_unk_letterspace=False, use_prosody_context=False, progress=gr.Progress(track_tqdm=True)):
     if model is None:
         model = load_model(language_id)  # singleton: dedupes concurrent loads, never double-loads
 
@@ -896,9 +902,32 @@ def generate(model, text, audio_prompt_path, exaggeration, temperature, seed_num
 
     # Bengali routes to the Bangla fine-tune singleton (rest stays multilingual)
     model = _resolve_model_for_language(model, language_id)
+    is_bn = str(language_id or "").lower().startswith("bn")
+
+    # Bangla-first text engine imports (stages 0-2, 4-6)
+    from src.audiobook.processing import (
+        create_silence_audio, unicode_repair_bangla, bangla_digit_normalize,
+        bangla_chunk_text, bangla_word_segments, letterspace_unknown_bangla,
+    )
+
+    # Stage 0+1 (Bangla): unicode repair (NFC, drop ZWJ/ZWNJ joiners) + deterministic
+    # digit normalization (lakh/crore grouping) — run BEFORE Gemini so the language
+    # model sees letters, never digit shapes, and the dari/nasal markers survive.
+    if is_bn:
+        text = unicode_repair_bangla(text)
+        text = bangla_digit_normalize(text)
 
     # Optional AI normalization (Gemini, precise ruleset): digits → spoken Bangla
     text, _used_gemini = gemini_rewrite(text, language_id)
+
+    # Stage 6 (opt-in): letter-space genuinely OOV words like a narrator would
+    # (ক-ম-ল), instead of letting the model garble/skip them.
+    _spelled = {}
+    if use_unk_letterspace and is_bn:
+        text, _spelled = letterspace_unknown_bangla(model, text, language_id)
+        if _spelled:
+            print(f"🔤 [TTS] Letter-spacing {len(_spelled)} word(s): "
+                  f"{', '.join(f'{k} → {v}' for k, v in list(_spelled.items())[:5])}", flush=True)
 
     # Warn about out-of-vocabulary words (checked against the RESOLVED model's
     # vocab): they become [UNK] tokens the model skips or garbles.
@@ -910,34 +939,56 @@ def generate(model, text, audio_prompt_path, exaggeration, temperature, seed_num
     if seed_num != 0:
         set_seed(int(seed_num))
 
-    # Import pause processing functions
-    from src.audiobook.processing import create_silence_audio
-    import re
+    text_content = text
+    # Build the segment plan: each entry is {"text", "pause_before", "lead"}.
+    # Bangla uses the Bangla-first engine (grapheme clusters, T3-token budget,
+    # dari।/॥/line-return pause hierarchy); other languages keep the classic
+    # line-break pause behavior + 50-word anti-truncation sentence split.
+    import re as _re
+    if is_bn:
+        _tok = getattr(getattr(model, "tokenizer", None), "text_to_tokens", None) or None
+        _chunks = bangla_chunk_text(text, tokenizer=_tok, max_tokens=500)
+        segments = []
+        _prev_tail = ""
+        for _i, _c in enumerate(_chunks):
+            _pieces = _re.split(r'(?<=[।॥?!])', _c["text"].rstrip())
+            _tail_sent = (_pieces[-2] + (_pieces[-1] if len(_pieces) > 1 else '')) if len(_pieces) > 1 else _c["text"]
+            _tail_sent = _tail_sent.strip()
+            _lead = ""
+            if use_prosody_context and _prev_tail and _i > 0:
+                # keep lead short; the acoustic budget of this chunk is unchanged
+                _lead = _prev_tail[-160:] if len(_prev_tail) > 160 else _prev_tail
+            segments.append({"text": _c["text"], "pause_before": float(_c.get("pause_before") or 0.0), "lead": _lead})
+            if _tail_sent:
+                _prev_tail = _tail_sent
+    else:
+        _legacy = _re.split(r'(\n+)', text)
+        _split_segs = []
+        for _s in _legacy:
+            if _s and '\n' not in _s and len(_s.split()) > 50:
+                _split_segs.extend(chunk_text_by_sentences(_s, 50))
+            else:
+                _split_segs.append(_s)
+        segments = [{"text": s if '\n' not in s else None,
+                     "pause_before": (s.count('\n') * 0.1) if '\n' in s else 0.0,
+                     "lead": ""} for s in _split_segs]
 
-    # Split text on line breaks to insert pauses between segments
-    segments = re.split(r'(\n+)', text)
-    # Anti-truncation: a single model call caps output (~40 s audio), so long
-    # text segments are pre-split into sentence groups. Without this, the tail
-    # of a long paragraph is silently cut off ("missing words").
-    _split_segs = []
-    for _s in segments:
-        if _s and '\n' not in _s and len(_s.split()) > 50:
-            _split_segs.extend(chunk_text_by_sentences(_s, 50))
-        else:
-            _split_segs.append(_s)
-    segments = _split_segs
+    # Drop empty no-pause breaks, then track how many will actually generate.
+    segments = [s for s in segments if (s["text"] or s["pause_before"] > 0)]
+    _gen_count = len([s for s in segments if s["text"]])
     audio_segments = []
     sample_rate = getattr(model, "sr", 24000) if model else 24000
     total_pauses_added = 0
     q_start = time.time()
     TTS_LIVE.update({"running": True, "stop": False, "t_start": q_start, "beat": q_start,
-                     "chunk": 0, "total": len(segments), "eta": 0.0, "ends_at": "—",
+                     "chunk": 0, "total": _gen_count, "eta": 0.0, "ends_at": "—",
                      "suspect": 0,
                      "paused": False, "label": "TTS QUICK", "job": TTS_LIVE.get("job", 0) + 1})
     threading.Thread(target=_tts_heartbeat, daemon=True).start()
-    print(f"[TTS QUICK {time.strftime('%H:%M:%S')}] Job started — {len(segments)} segment(s), RAM {_rss_mb():.0f}MB", flush=True)
+    print(f"[TTS QUICK {time.strftime('%H:%M:%S')}] Job started — {_gen_count} segment(s), RAM {_rss_mb():.0f}MB", flush=True)
     seg_times = []
     slow_log = []
+    done_n = 0
     def _qstop():
         TTS_LIVE["stop"] = True
         TTS_LIVE["running"] = False
@@ -954,71 +1005,82 @@ def generate(model, text, audio_prompt_path, exaggeration, temperature, seed_num
     print("✅ [TTS] Voice conditioning ready.")
     
     for seg_i, segment in enumerate(segments):
-        if not segment:
+        if not segment or not segment.get("text"):
             continue
-            
-        if '\n' in segment:
-            # This is a line break segment - convert to pause
-            num_breaks = segment.count('\n')
-            pause_duration = num_breaks * 0.1  # 0.1 seconds per line break
-            if pause_duration > 0:
-                pause_audio = create_silence_audio(pause_duration, sample_rate)
-                audio_segments.append(pause_audio)
-                total_pauses_added += pause_duration
-                print(f"🔇 Adding {pause_duration:.1f}s pause ({num_breaks} returns)")
-        else:
-            # This is actual text - generate audio
-            text_segment = segment.strip()
-            if text_segment:
-                print(f"🎵 [TTS] Generating audio for: \"{text_segment[:60]}...\"" if len(text_segment) > 60 else f"🎵 [TTS] Generating audio for: \"{text_segment}\"")
-                import time as _time
-                _t0 = _time.time()
-                # Seed the live token estimate (~1.3 speech tokens/char observed)
-                # so the heartbeat can show tok/s + ETA during the AR loop.
-                # Written to BOTH module trees (see heartbeat note above).
+
+        # Insert the boundary pause BEFORE its chunk (dari 0.6 / ॥ 1.2 /
+        # paragraph 1.0 / soft return 0.15 / legacy 0.1-per-return).
+        _pause = float(segment.get("pause_before") or 0.0)
+        if _pause > 0:
+            pause_audio = create_silence_audio(_pause, sample_rate)
+            audio_segments.append(pause_audio)
+            total_pauses_added += _pause
+            print(f"🔇 Adding {_pause:.2f}s pause (boundary cue)")
+
+        text_segment = segment["text"].strip()
+        if not text_segment:
+            continue
+        _lead = segment.get("lead") or ""
+        _gen_text = f"{_lead} {text_segment}" if _lead else text_segment
+        print(f"🎵 [TTS] Generating audio for: \"{text_segment[:60]}...\"" if len(text_segment) > 60 else f"🎵 [TTS] Generating audio for: \"{text_segment}\"")
+        import time as _time
+        _t0 = _time.time()
+        # Seed the live token estimate (~1.3 speech tokens/char observed)
+        # so the heartbeat can show tok/s + ETA during the AR loop.
+        # Written to BOTH module trees (see heartbeat note above).
+        try:
+            _est = max(80, int(len(text_segment) * 1.35))
+            for _mod in ("src.chatterbox.models.t3.t3", "chatterbox.models.t3.t3"):
                 try:
-                    _est = max(80, int(len(text_segment) * 1.35))
-                    for _mod in ("src.chatterbox.models.t3.t3", "chatterbox.models.t3.t3"):
-                        try:
-                            _m = sys.modules.get(_mod) or __import__(_mod, fromlist=["T3_PROGRESS"])
-                            _m.T3_PROGRESS.update({"est": _est, "tokens": 0, "active": False})
-                        except Exception:
-                            continue
+                    _m = sys.modules.get(_mod) or __import__(_mod, fromlist=["T3_PROGRESS"])
+                    _m.T3_PROGRESS.update({"est": _est, "tokens": 0, "active": False})
                 except Exception:
-                    pass
-                TTS_LIVE.update({"chunk": seg_i + 1, "beat": _t0, "cstart": _t0})
-                wav = model.generate(
-                    text_segment,
-                    conds,
-                    language_id=language_id,
-                    exaggeration=exaggeration,
-                    temperature=temperature,
-                    cfg_weight=cfgw,
-                    min_p=min_p,
-                    top_p=top_p,
-                    repetition_penalty=repetition_penalty,
-                )
-                print(f"✅ [TTS] Segment done in {_time.time()-_t0:.1f}s")
-                audio_np = wav.squeeze(0).numpy()
-                audio_segments.append(audio_np)
-                seg_dur = _time.time() - _t0
-                seg_times.append(seg_dur)
-                slow_log.append((seg_dur, f"seg {done_n} ({len(text_segment.split())}w)"))
-                seg_audio = len(audio_np) / sample_rate
-                rtf = seg_audio / seg_dur if seg_dur > 0 else 0
-                done_n = len(seg_times)
-                avg = sum(seg_times) / done_n
-                eta = avg * (len([s for s in segments if s.strip()]) - done_n)
-                ends_at = (datetime.now() + timedelta(seconds=max(0, eta))).strftime('%H:%M:%S')
-                TTS_LIVE.update({"chunk": seg_i + 1, "beat": _time.time(), "eta": eta, "ends_at": ends_at, "avg": avg})
-                print(f"[TTS QUICK {time.strftime('%H:%M:%S')}] seg {done_n}: {seg_audio:.1f}s audio in {seg_dur:.1f}s ({rtf:.2f}× realtime) | ETA {eta:.0f}s (ends ~{ends_at}) | RAM {_rss_mb():.0f}MB", flush=True)
-                _coverage_ok("TTS QUICK", len(text_segment), seg_audio, TTS_LIVE, tag=f" seg {done_n}")
-                if progress is not None:
-                    try:
-                        progress((seg_i + 1) / max(len(segments), 1),
-                                 desc=f"Segment {done_n} done • {seg_audio:.1f}s audio • ETA {eta:.0f}s • ends ~{ends_at}")
-                    except Exception:
-                        pass
+                    continue
+        except Exception:
+            pass
+        TTS_LIVE.update({"chunk": seg_i + 1, "beat": _t0, "cstart": _t0})
+        wav = model.generate(
+            _gen_text,
+            conds,
+            language_id=language_id,
+            exaggeration=exaggeration,
+            temperature=temperature,
+            cfg_weight=cfgw,
+            min_p=min_p,
+            top_p=top_p,
+            repetition_penalty=repetition_penalty,
+        )
+        # Stage 5: trim the estimated leading-audio for the prosody lead-in so it
+        # doesn't repeat the previous sentence (approximate token→time mapping;
+        # only enabled when use_prosody_context is on).
+        if _lead and wav is not None:
+            try:
+                _trim_n = int((len(_lead) * 1.35) * (1.0 / 25.0) * sample_rate)
+                if _trim_n > 0 and wav.shape[-1] > _trim_n + 8000:
+                    wav = wav[..., _trim_n:]
+            except Exception:
+                pass
+        print(f"✅ [TTS] Segment done in {_time.time()-_t0:.1f}s")
+        audio_np = wav.squeeze(0).numpy()
+        audio_segments.append(audio_np)
+        seg_dur = _time.time() - _t0
+        seg_times.append(seg_dur)
+        slow_log.append((seg_dur, f"seg {done_n} ({len(text_segment.split())}w)"))
+        seg_audio = len(audio_np) / sample_rate
+        rtf = seg_audio / seg_dur if seg_dur > 0 else 0
+        done_n = len(seg_times)
+        avg = sum(seg_times) / done_n
+        eta = avg * (_gen_count - done_n)
+        ends_at = (datetime.now() + timedelta(seconds=max(0, eta))).strftime('%H:%M:%S')
+        TTS_LIVE.update({"chunk": seg_i + 1, "beat": _time.time(), "eta": eta, "ends_at": ends_at, "avg": avg})
+        print(f"[TTS QUICK {time.strftime('%H:%M:%S')}] seg {done_n}: {seg_audio:.1f}s audio in {seg_dur:.1f}s ({rtf:.2f}× realtime) | ETA {eta:.0f}s (ends ~{ends_at}) | RAM {_rss_mb():.0f}MB", flush=True)
+        _coverage_ok("TTS QUICK", len(text_segment), seg_audio, TTS_LIVE, tag=f" seg {done_n}")
+        if progress is not None:
+            try:
+                progress((seg_i + 1) / max(_gen_count, 1),
+                         desc=f"Segment {done_n} done • {seg_audio:.1f}s audio • ETA {eta:.0f}s • ends ~{ends_at}")
+            except Exception:
+                pass
     
     # Combine all audio segments
     if audio_segments:
@@ -6191,6 +6253,18 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
                     with gr.Accordion("⚙️ Advanced Options", open=False):
                         seed_num = gr.Number(value=0, label="Random seed (0 for random)")
                         temp = gr.Slider(0.05, 5, step=.05, label="Temperature", value=.8)
+                        with gr.Group():
+                            gr.HTML("<small>Bengali-only smart features (apply to <b>bn</b> / <b>bn2</b>):</small>")
+                            use_prosody_ctx = gr.Checkbox(
+                                label="Sentence context carry-over (smoother Bangla prosody)",
+                                value=False,
+                                info="Feeds the previous sentence into each next chunk (short lead-in) for continuous intonation"
+                            )
+                            use_unk_letterspace = gr.Checkbox(
+                                label="Spell out unknown words letter-by-letter",
+                                value=False,
+                                info="Narrator-style 'ক-ম-ল' for genuinely out-of-vocabulary words instead of silent garbling"
+                            )
 
                     with gr.Row():
                         run_btn = gr.Button("🎵 Generate Speech", variant="primary", size="lg")
@@ -7670,10 +7744,11 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
 
     # TTS Generation
     run_btn.click(
-        fn=lambda model, text, audio, exag, temp, seed, cfgw, lang, progress=gr.Progress(track_tqdm=True): generate(
+        fn=lambda model, text, audio, exag, temp, seed, cfgw, lang, prosody_ctx, unk_ls, progress=gr.Progress(track_tqdm=True): generate(
             model, text, audio, exag, temp, seed, cfgw,
             min_p=0.05, top_p=1.0, repetition_penalty=1.2,
-            language_id=lang, progress=progress
+            language_id=lang, use_unk_letterspace=unk_ls,
+            use_prosody_context=prosody_ctx, progress=progress
         ),
         inputs=[
             model_state,
@@ -7684,6 +7759,8 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
             seed_num,
             cfg_weight,
             tts_language,
+            use_prosody_ctx,
+            use_unk_letterspace,
         ],
         outputs=audio_output,
     ).then(

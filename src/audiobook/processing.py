@@ -7,6 +7,7 @@ Handles text chunking, validation, multi-voice parsing, and text cleanup.
 import re
 import os
 import wave
+import unicodedata
 import numpy as np
 
 try:
@@ -937,3 +938,355 @@ def process_voice_content_with_line_breaks(voice_name: str, content: str, max_wo
                 })
     
     return segments 
+
+
+# ============================================================================
+# Bangla-first text engine
+# ----------------------------------------------------------------------------
+# The base Chatterbox TTS is English-born; these helpers make the text layer
+# treat Bengali as Bengali (abugida, dari । sentence ender, lakh/crore digits,
+# agglutinative morphology, grapheme-cluster boundaries) instead of
+# "English without spaces". Everything below is deterministic and never raises.
+
+_BN_RE = re.compile(r'[\u0980-\u09FF]')
+_BN_SENT_END = re.compile(r'[।॥?!]$')
+
+# Space is a phrase boundary, not a word boundary, in Bangla: attachable case
+# postpositions / plural classifiers glue onto the noun. Listed longest-first,
+# and only split when the remaining stem is >= 2 clusters (avoids shredding
+# conjunct stacks like ক্ষ / জ্ঞ).
+_BN_ATTACH = [
+    'গুলিকেই', 'গুলোকেই', 'গুলোটাই', 'গুলোটাকে', 'গুলিটার', 'গুলোরই',
+    'গুলোই', 'গুলোতে', 'গুলোকে', 'গুলোর', 'গুলির', 'গুলো', 'গুলা', 'গুলি',
+    'খানেক', 'খানা', 'খানি', 'জনদের', 'য়ের', 'দের', 'ের',
+]
+_BN_ATTACH_RE = re.compile('|'.join(re.escape(s) for s in _BN_ATTACH))
+
+# Pause hierarchy for chunk boundaries (seconds). , and — are deliberately NOT
+# chunk boundaries: they're intra-clause cues the acoustic model renders.
+BANGLA_PAUSE_SECONDS = {
+    '।': 0.6, '?': 0.6, '!': 0.6,
+    '॥': 1.2,
+    '\n\n': 1.0,
+    '\n': 0.15,
+}
+
+# Bangla numerals 0-99 (spoken). Used by bangla_digit_normalize.
+_BN0_99 = {
+    0: 'শূন্য', 1: 'এক', 2: 'দুই', 3: 'তিন', 4: 'চার', 5: 'পাঁচ', 6: 'ছয়',
+    7: 'সাত', 8: 'আট', 9: 'নয়', 10: 'দশ', 11: 'এগারো', 12: 'বারো',
+    13: 'তেরো', 14: 'চৌদ্দ', 15: 'পনেরো', 16: 'ষোলো', 17: 'সতেরো',
+    18: 'আঠারো', 19: 'উনিশ', 20: 'বিশ', 21: 'একুশ', 22: 'বাইশ', 23: 'তেইশ',
+    24: 'চব্বিশ', 25: 'পঁচিশ', 26: 'ছাব্বিশ', 27: 'সাতাশ', 28: 'আঠাশ',
+    29: 'ঊনত্রিশ', 30: 'ত্রিশ', 31: 'একত্রিশ', 32: 'বত্রিশ', 33: 'তেত্রিশ',
+    34: 'চৌত্রিশ', 35: 'পঁয়ত্রিশ', 36: 'ছত্রিশ', 37: 'সাঁইত্রিশ',
+    38: 'আটত্রিশ', 39: 'ঊনচল্লিশ', 40: 'চল্লিশ', 41: 'একচল্লিশ',
+    42: 'বিয়াল্লিশ', 43: 'তেতাল্লিশ', 44: 'চুয়াল্লিশ', 45: 'পঁয়তাল্লিশ',
+    46: 'ছেচল্লিশ', 47: 'সাতচল্লিশ', 48: 'আটচল্লিশ', 49: 'ঊনপঞ্চাশ',
+    50: 'পঞ্চাশ', 51: 'একান্ন', 52: 'বাহান্ন', 53: 'তেপ্পান্ন', 54: 'চুয়ান্ন',
+    55: 'পঞ্চান্ন', 56: 'ছাপ্পান্ন', 57: 'সাতান্ন', 58: 'আটান্ন', 59: 'ঊনষাট',
+    60: 'ষাট', 61: 'একষট্টি', 62: 'বাষট্টি', 63: 'তেষট্টি', 64: 'চৌষট্টি',
+    65: 'পঁয়ষট্টি', 66: 'ছেষট্টি', 67: 'সাতষট্টি', 68: 'আটষট্টি',
+    69: 'ঊনসত্তর', 70: 'সত্তর', 71: 'একাত্তর', 72: 'বাহাত্তর', 73: 'তিয়াত্তর',
+    74: 'চুয়াত্তর', 75: 'পঁচাত্তর', 76: 'ছিয়াত্তর', 77: 'সাতাত্তর',
+    78: 'আটাত্তর', 79: 'ঊনআশি', 80: 'আশি', 81: 'একাশি', 82: 'বিরাশি',
+    83: 'তিরাশি', 84: 'চুরাশি', 85: 'পঁচাশি', 86: 'ছিয়াশি', 87: 'সাতাশি',
+    88: 'আটাশি', 89: 'ঊননব্বই', 90: 'নব্বই', 91: 'একানব্বই', 92: 'বিরানব্বই',
+    93: 'তিরানব্বই', 94: 'চুরানব্বই', 95: 'পঁচানব্বই', 96: 'ছিয়ানব্বই',
+    97: 'সাতানব্বই', 98: 'আটানব্বই', 99: 'নিরানব্বই',
+}
+_BN_HUND = ['', 'একশো', 'দুইশো', 'তিনশো', 'চারশো', 'পাঁচশো', 'ছয়শো', 'সাতশো', 'আটশো', 'নয়শো']
+_BN0_9 = [_BN0_99[i] for i in range(10)]
+_BN_DIGIT_RE = re.compile(r'[0-9০-৯]+(?:[,.][0-9০-৯]+)*')
+
+
+def is_bangla_text(text):
+    """True if the string contains any Bengali-script character."""
+    return bool(text) and bool(_BN_RE.search(text))
+
+
+def unicode_repair_bangla(text):
+    """NFC-normalize; drop ZWJ/ZWNJ rendering hints and stray joiners.
+
+    Keep hasanta conjuncts intact on the codepoint level (a cluster is one
+    unit); stripping U+200C/U+200D only removes optional glyph-joining hints
+    that fragment English-trained BPE vocabularies into UNK pieces.
+    """
+    if not text or not is_bangla_text(text):
+        return text
+    text = unicodedata.normalize('NFC', text)
+    text = text.replace('\u200c', '').replace('\u200d', '')
+    text = text.replace('\ufeff', '').replace('\u00a0', ' ')
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+    return text
+
+
+def _clusters(text):
+    """Yield Bangla-safe grapheme clusters (base + combining marks + joiners)."""
+    buf = ""
+    for ch in text:
+        cat = unicodedata.category(ch)
+        if cat in ('Mn', 'Mc', 'Cf'):
+            buf += ch
+        else:
+            if buf:
+                yield buf
+            buf = ch
+    if buf:
+        yield buf
+
+
+def bangla_word_segments(text):
+    """Morph-aware word tokens for scanning, NOT for altering spoken text.
+
+    Splits on spaces/punctuation, then strips only word-FINAL attached case
+    postpositions / plural classifiers so the UNK scan sees the stem.
+    Conjunct stacks, glued chains, and short stems are never shredded.
+    """
+    if not is_bangla_text(text):
+        return [w for w in text.split() if w]
+    parts = re.split(r'([\u0980-\u09FF]+)', text)
+    words = []
+    for part in parts:
+        if not part:
+            continue
+        if not _BN_RE.search(part):
+            words.extend([w for w in re.split(r'[\s\W_]+', part) if w])
+            continue
+        stem = part
+        while True:
+            hit = None
+            for suf in _BN_ATTACH:
+                if stem.endswith(suf):
+                    hit = suf
+                    break
+            if not hit or len(list(_clusters(stem[:-len(hit)]))) < 2:
+                break
+            stem = stem[:-len(hit)]
+        words.append(stem)
+    return [w for w in words if w]
+
+
+def _bn_num_words(n):
+    """Convert an int to spoken Bangla with lakh/crore Indian grouping."""
+    if n < 0:
+        return 'মাইনাস ' + _bn_num_words(-n)
+    if n < 100:
+        return _BN0_99[n]
+    parts = []
+    crore = n // 10000000
+    n %= 10000000
+    lakh = n // 100000
+    n %= 100000
+    thousand = n // 1000
+    n %= 1000
+    hundred = n // 100
+    rest = n % 100
+    if crore:
+        parts.append((_bn_num_words(crore) if crore >= 100 else _BN0_99[crore]) + ' কোটি')
+    if lakh:
+        parts.append((_bn_num_words(lakh) if lakh >= 100 else _BN0_99[lakh]) + ' লাখ')
+    if thousand:
+        parts.append((_bn_num_words(thousand) if thousand >= 100 else _BN0_99[thousand]) + ' হাজার')
+    if hundred:
+        parts.append(_BN_HUND[hundred])
+    if rest:
+        parts.append(_BN0_99[rest])
+    return ' '.join(parts) if parts else _BN0_99[n]
+
+
+def bangla_digit_normalize(text):
+    """Deterministic digit -> spoken Bangla, Indian (lakh/crore) grouping.
+
+    Runs BEFORE any Gemini pass so the language model sees letters, not digit
+    shapes (both ASCII 123 and Bangla ১২৩). Pure numbers with a leading zero
+    (phone numbers, codes) are read digit-by-digit like a narrator would.
+    """
+    if not text or not is_bangla_text(text):
+        return text
+
+    def _repl(m):
+        digits = m.group(0)
+        out = []
+        for ch in digits:
+            if ch in (',', '.'):
+                continue
+            if '0' <= ch <= '9':
+                out.append(ch)
+            else:
+                out.append(str('০১২৩৪৫৬৭৮৯'.index(ch)))
+        digits = ''.join(out)
+        s = digits.lstrip('0')
+        if not s:
+            return _BN0_99[0]
+        if digits.startswith('0'):
+            return ' '.join(_BN0_9[int(ch)] for ch in digits)
+        return _bn_num_words(int(s))
+
+    return _BN_DIGIT_RE.sub(_repl, text)
+
+
+def bangla_pause_duration(cue):
+    """Seconds of silence for a boundary cue (unknown → 0)."""
+    return BANGLA_PAUSE_SECONDS.get(cue, 0.0)
+
+
+def _bangla_letter_runs(text):
+    """Full raw Bangla word tokens (incl. attached suffixes), letter-only.
+    Excludes digit sequences so numbers are never letter-spaced."""
+    for part in re.split(r'([\u0980-\u09FF]+)', text):
+        if part and re.search(r'[\u0985-\u09CE]', part):
+            yield part
+
+
+def letterspace_unknown_bangla(model, text, language_id="bn", max_words=8):
+    """Opt-in, Bangla-only: spell out-of-vocab words letter-by-letter like a
+    narrator ("ক-ম-ল") instead of letting the model garble or skip them.
+
+    Only fully unknown word tokens are touched (tokenizer reports [UNK]); if
+    more than max_words are unknown the text is left unchanged (over-spacing
+    would degrade prosody). Returns (text2, {original: spaced}). Never raises.
+    """
+    if not text or not is_bangla_text(text):
+        return text, {}
+    tok = getattr(model, "tokenizer", None)
+    if tok is None:
+        return text, {}
+    vocab = tok.tokenizer.get_vocab() if hasattr(tok, "tokenizer") else {}
+    unk_id = vocab.get("[UNK]")
+    if unk_id is None:
+        return text, {}
+
+    candidates = []
+    for w in _bangla_letter_runs(text):
+        try:
+            try:
+                ids = tok.encode(w, language_id=language_id)
+            except TypeError:
+                ids = tok.encode(w)
+        except Exception:
+            continue
+        ids = list(ids[0]) if hasattr(ids, "dim") else list(ids)
+        if any(int(i) == unk_id for i in ids):
+            candidates.append(w)
+
+    if not candidates:
+        return text, {}
+    if len(candidates) > max_words:
+        print(f"🔤 [BN] {len(candidates)} unknown words — above the {max_words} "
+              f"letter-spacing cap, leaving text unchanged.", flush=True)
+        return text, {}
+
+    out = text
+    touched = {}
+    for w in candidates:
+        spaced = ' '.join(_clusters(w))
+        out = re.sub(re.escape(w), spaced, out)
+        touched[w] = spaced
+    return out, touched
+
+
+def _bn_count_tokens(s, tokenizer):
+    try:
+        if tokenizer is not None:
+            t = tokenizer.text_to_tokens(s)
+            n = int(t.shape[-1])
+            if n:
+                return n
+    except Exception:
+        pass
+    return max(1, (len(s) // 2) + 1)
+
+
+def bangla_chunk_text(text, tokenizer=None, max_tokens=500, max_clusters=2400):
+    """Bangla-aware segmentation returning [{text, pause_before}].
+
+    - Never cuts inside a grapheme cluster (hasanta conjunct / vowel matra).
+    - Chunk budget is T3 *text tokens* (not English "words") when a tokenizer
+      is passed, else grapheme clusters — so the 1000-token AR cap is respected.
+    - Boundary cues follow BANGLA_PAUSE_SECONDS (dari 0.6s, ॥ 1.2s, blank line
+      1.0s, soft newline 0.15s). Punctuation is kept on the chunk so the model
+      gets the intonation cue; the pause is emitted BEFORE the next chunk.
+    """
+    text = unicode_repair_bangla(text)
+    if not text:
+        return []
+    text = re.sub(r'\n{2,}', '\n\n', text)
+
+    cues = []  # (text_or_None, cue)
+    for piece in re.split(r'(\n\n+)', text):
+        if not piece:
+            continue
+        if '\n\n' in piece:
+            cues.append((None, '\n\n'))
+            continue
+        for line in re.split(r'(\n)', piece):
+            if not line:
+                continue
+            if line == '\n':
+                cues.append((None, '\n'))
+                continue
+            for sent in re.split(r'(?<=[।॥?!])\s*', line):
+                if not sent.strip():
+                    continue
+                cue = '।' if sent.rstrip().endswith(('।', '?', '!', '॥')) else None
+                cues.append((sent.strip(), cue))
+
+    chunks = []
+    buf = ''
+    buf_tok = 0
+    for raw_sent, cue in cues:
+        if raw_sent is None:
+            if buf:
+                chunks.append({'text': buf, 'pause_before': bangla_pause_duration(cue) if cue else 0.0})
+                buf = ''
+                buf_tok = 0
+            elif chunks:
+                chunks[-1]['pause_before'] += bangla_pause_duration(cue)
+            elif cue:
+                chunks.append({'text': '', 'pause_before': bangla_pause_duration(cue)})
+            continue
+        n_tok = _bn_count_tokens(raw_sent, tokenizer)
+        if buf and buf_tok + n_tok > max_tokens:
+            chunks.append({'text': buf, 'pause_before': 0.0})
+            buf = ''
+            buf_tok = 0
+        if n_tok > max_tokens:
+            cls = list(_clusters(raw_sent))
+            step = max(80, int(max_tokens * 1.2))
+            start = 0
+            while start < len(cls):
+                end = min(start + step, len(cls))
+                cut = end
+                if end < len(cls):
+                    for i in range(end, max(start, end - 80), -1):
+                        if i < len(cls) and cls[i] in (' ', '\u00a0'):
+                            cut = i + 1
+                            break
+                sub = ''.join(cls[start:cut]).strip()
+                if sub:
+                    if start:
+                        chunks.append({'text': '', 'pause_before': 0.0})
+                    chunks.append({'text': sub, 'pause_before': 0.0})
+                start = cut
+            continue
+        buf += ((' ' if buf else '') + raw_sent)
+        buf_tok += n_tok
+        if len(list(_clusters(buf))) >= max_clusters and buf_tok >= max_tokens:
+            chunks.append({'text': buf, 'pause_before': 0.0})
+            buf = ''
+            buf_tok = 0
+
+    if buf:
+        chunks.append({'text': buf, 'pause_before': 0.0})
+
+    if not chunks:
+        return []
+
+    resolved = [c for c in chunks if c['text']]
+    for i in range(len(resolved)):
+        if not resolved[i]['pause_before']:
+            m = re.search(r'([।॥?!])$', resolved[i]['text'].strip())
+            if m and i > 0:
+                resolved[i]['pause_before'] = BANGLA_PAUSE_SECONDS[m.group(1)]
+    return resolved 
