@@ -120,11 +120,13 @@ Switching the language dropdown auto-fills a native sample sentence (24 language
 Bengali text goes to the model **exactly as you type it** — numbers, years, currency and edge cases are **not** rewritten locally. Write them out as spoken Bangla words beforehand (e.g. prepare the text with an online AI) so the fine-tune voices them correctly: `১৯৮৭` → `উনিশশো সাতাশি`, `৫:৩০` → `সাড়ে পাঁচটা`, `৳৫০০` → `পাঁচশ টাকা`.
 
 ### 🤖 Optional: AI-assist normalization (Gemini)
-The accordion at the top of the app — **AI Text Normalization** — lets Gemini do that rewriting for you, automatically, using the exact ruleset of the former local engine (canonical 0–99 words, হাজার/লাখ/কোটি scales, clock words, year-style years, currency with paise, ordinals, units, acronyms, phones; preserves `[Name]` tags, URLs, line breaks):
+The accordion at the top of the app — **AI Text Normalization** — lets Gemini do that rewriting for you, automatically, using the project's **Master-Prompt ruleset** (`prompts/Bangla_Audiobook_Master_Language_Prompt_v3.txt`, a full conservative Bangla audiobook normalizer: canonical 0–99 words, হাজার/লাখ/কোটি scales, clock words, year-style years, currency with paise, ordinals, units, acronyms from a trusted dictionary, phones; protects dialect, names, brands, URLs, `[Name]` tags, line breaks). The prompt is read from disk per call, so you can edit the `.txt` anytime and it applies on the next Generate:
 1. Add a free key from [Google AI Studio](https://aistudio.google.com/apikey) and click **Test**.
-2. Tick **Enable** — every Bengali job (TTS tab + both audiobook tabs) now routes raw text through Gemini first, then voices the normalized result.
-3. **Never breaks**: if the key is wrong, offline, or the API errors, your text is used **exactly as typed** (a `🤖 [GEMINI] Skipped …` line explains why). The raw normalized text is printed in the terminal for review.
-4. Works with multi-voice too: `[চরিত্র]` tags are kept verbatim so routing is unaffected.
+2. Tick **Enable** — every Bengali job (TTS tab + both audiobook tabs, `bn` and `bn2`) now routes raw text through Gemini first, then voices the normalized result.
+3. **Whole books work**: long text is auto-chunked at sentence/paragraph boundaries (each chunk ≤ 30k chars) and re-joined — nothing is skipped for length.
+4. **Custom prompt file (optional)**: the box under the key lets you point at any `.txt` (e.g. a future v4). Empty/invalid file → the built-in prompt, never a crash.
+5. **Never breaks**: if the key is wrong, offline, or the API errors, your text is used **exactly as typed** (a `🤖 [GEMINI] Skipped …` line explains why). The raw normalized text is printed in the terminal for review.
+6. Works with multi-voice too: `[চরিত্র]` tags are kept verbatim so routing is unaffected.
 
 ---
 

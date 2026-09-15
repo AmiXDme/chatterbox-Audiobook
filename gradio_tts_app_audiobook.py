@@ -348,7 +348,7 @@ TTS_LIVE = {"running": False, "stop": True, "t_start": 0.0, "chunk": 0,
             "label": "TTS", "job": 0, "beat": 0.0}
 TTS_HEARTBEAT_SECONDS = 5
 
-GEMINI_CFG = {"enabled": False, "api_key": ""}
+GEMINI_CFG = {"enabled": False, "api_key": "", "prompt_path": ""}
 
 
 def gemini_rewrite(text, language_id):
@@ -364,7 +364,8 @@ def gemini_rewrite(text, language_id):
     if not text or not text.strip():
         return text, False
     try:
-        from src.audiobook.gemini_normalizer import gemini_normalize
+        from src.audiobook.gemini_normalizer import gemini_normalize, set_prompt_file
+        set_prompt_file(GEMINI_CFG.get("prompt_path"))
         n = len(text)
         print(f"🤖 [GEMINI] Normalizing Bangla text ({n} chars)...", flush=True)
         out = gemini_normalize(text, GEMINI_CFG.get("api_key"))
@@ -6083,13 +6084,18 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
         GEMINI_CFG["api_key"] = (v or "").strip()
         return None
 
-    def _gemini_test(enable, key):
-        from src.audiobook.gemini_normalizer import api_key_ok, gemini_normalize
+    def _gemini_set_prompt_path(v):
+        GEMINI_CFG["prompt_path"] = (v or "").strip()
+        return None
+
+    def _gemini_test(enable, key, prompt_path):
+        from src.audiobook.gemini_normalizer import api_key_ok, gemini_normalize, set_prompt_file
         if enable and not api_key_ok(key):
             return "❌ Key invalid — must start with 'AIza' (google ai studio → apikey)"
         if not enable:
             return "ℹ️ Enable AI normalization first."
         try:
+            set_prompt_file(prompt_path)
             out = gemini_normalize("ড. রহমান ৫০% ছাড়ে ৩টি বই ৳১,০০০ দিয়ে কিনলেন।", key)
             good = "পঞ্চাশ শতাংশ" in out and "এক হাজার টাকা" in out and "[UNK]" not in out
             return f"✅ Works ({len(out)} chars). Test output: {out[:120]}" + ("" if good else " ⚠️ check rules")
@@ -6099,9 +6105,10 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
     with gr.Accordion("🤖 AI Text Normalization (Gemini) — for Bangla", open=False):
         gr.Markdown(
             "Raw Bangla text → **Gemini rewrites digits/currency/years/clock-times into "
-            "spoken Bangla** (using the exact ruleset from the former local engine) → the "
-            "normalized text goes to Chatterbox. **If it is off or fails, your text is used "
-            "exactly as typed** — this never breaks generation. A free key: "
+            "spoken Bangla** using the project's Master-Prompt ruleset (or any custom "
+            "prompt file you point at below). Long text is auto-chunked, so whole books "
+            "are normalized. **If it is off or fails, your text is used exactly as typed** "
+            "— this never breaks generation. A free key: "
             "[Google AI Studio](https://aistudio.google.com/apikey)."
         )
         with gr.Row():
@@ -6111,10 +6118,17 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
                                         placeholder="AIza... (Google AI Studio)",
                                         info="Kept in memory only, never saved/logged")
             gemini_test_btn = gr.Button("Test", size="sm")
+        with gr.Row():
+            default_prompt = str(Path(__file__).resolve().parent / "prompts" / "Bangla_Audiobook_Master_Language_Prompt_v3.txt")
+            gemini_prompt_path = gr.Textbox(label="Normalization prompt file (.txt) — optional",
+                                            value=default_prompt,
+                                            placeholder="path/to/your_prompt.txt",
+                                            info="Edit the file anytime; changes apply on the next Generate")
         gemini_status = gr.Markdown("🤖 AI normalization: OFF")
         gemini_enable.change(fn=_gemini_set_enabled, inputs=[gemini_enable], outputs=[gemini_status])
         gemini_api_key.change(fn=_gemini_set_key, inputs=[gemini_api_key], outputs=[])
-        gemini_test_btn.click(fn=_gemini_test, inputs=[gemini_enable, gemini_api_key], outputs=[gemini_status])
+        gemini_prompt_path.change(fn=_gemini_set_prompt_path, inputs=[gemini_prompt_path], outputs=[])
+        gemini_test_btn.click(fn=_gemini_test, inputs=[gemini_enable, gemini_api_key, gemini_prompt_path], outputs=[gemini_status])
 
     with gr.Tabs():
         

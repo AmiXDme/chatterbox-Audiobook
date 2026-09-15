@@ -229,9 +229,8 @@ def _load_emtiazz_engine(bangla2_dir) -> BanglaTTS2:
         conds = Conditionals.load(conds_path, map_location=_torch.device("cpu")).to("cpu")
 
     engine = ChatterboxTTS(t3, s3gen, ve, tokenizer, "cpu", conds=conds)
-    model = BanglaTTS2()
-    model.__dict__.update(engine.__dict__)
-    return model
+    engine.__class__ = BanglaTTS2  # reclass: inherits the language_id-tolerant generate()
+    return engine
 
 
 def load_bangla_model(variant="bosonlab") -> BanglaTTS:
