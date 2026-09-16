@@ -345,12 +345,25 @@ TTS_LIVE = {"running": False, "stop": True, "t_start": 0.0, "chunk": 0,
             "label": "TTS", "job": 0, "beat": 0.0}
 TTS_HEARTBEAT_SECONDS = 5
 
-GEMINI_CFG = {"enabled": False, "api_key": "", "prompt_path": ""}
+GEMINI_CFG = {"enabled": True, "api_key": "", "prompt_path": ""}
 
 
-def gemini_rewrite(text, language_id):
-    """Precise AI normalization for Bangla. Returns (text, used_gemini). Safe."""
-    if not (GEMINI_CFG.get("enabled") and GEMINI_CFG.get("api_key")):
+def _gemini_key():
+    """Resolve the API key: in-memory box first, then env var (auto ON)."""
+    k = (GEMINI_CFG.get("api_key") or "").strip()
+    if k:
+        return k
+    return os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or ""
+
+
+def gemini_rewrite(text, language_id, instruction=None):
+    """Precise AI normalization for Bangla. Returns (text, used_gemini). Safe.
+    Enabled by default when a key is available (env or the UI box); the UI
+    checkbox can still force it off. instruction = 'what the user wants'."""
+    if not GEMINI_CFG.get("enabled", True):
+        return text, False
+    key = _gemini_key()
+    if not key:
         return text, False
     try:
         from src.audiobook.bangla import is_bangla
@@ -361,11 +374,14 @@ def gemini_rewrite(text, language_id):
     if not text or not text.strip():
         return text, False
     try:
-        from src.audiobook.gemini_normalizer import gemini_normalize, set_prompt_file
+        from src.audiobook.gemini_normalizer import gemini_normalize, set_prompt_file, api_key_ok
+        if not api_key_ok(key):
+            print(f"🤖 [GEMINI] Key invalid (must start 'AIza') — used text as typed.", flush=True)
+            return text, False
         set_prompt_file(GEMINI_CFG.get("prompt_path"))
         n = len(text)
         print(f"🤖 [GEMINI] Normalizing Bangla text ({n} chars)...", flush=True)
-        out = gemini_normalize(text, GEMINI_CFG.get("api_key"))
+        out = gemini_normalize(text, key, instruction=instruction)
         print(f"🤖 [GEMINI] Done → {len(out)} chars (was {n}).", flush=True)
         print(f"🤖 [GEMINI] Normalized: {out[:400]}{'…' if len(out) > 400 else ''}", flush=True)
         return out, True
@@ -374,7 +390,7 @@ def gemini_rewrite(text, language_id):
         return text, False
 
 
-def _preview_gemini_text(text_content, language_id):
+def _preview_gemini_text(text_content, language_id, gemini_instruction=None):
     """Preview the exact normalized text TTS will use (same code path as generate).
     Runs the deterministic engine then Gemini, so the shown text is byte-identical
     to what would be generated. Non-Bangla / Gemini-off → reflects input as-is."""
@@ -384,7 +400,7 @@ def _preview_gemini_text(text_content, language_id):
         from src.audiobook.processing import unicode_repair_bangla, bangla_normalize_text
         t = unicode_repair_bangla(text_content)
         t = bangla_normalize_text(t)
-        out, _used = gemini_rewrite(t, language_id)
+        out, _used = gemini_rewrite(t, language_id, instruction=gemini_instruction)
         print(f"🔍 [PREVIEW] Gemini rewrite preview ready ({_used and 'Gemini used' or 'Gemini not used, deterministic only'}).", flush=True)
         return out
     except Exception as e:
@@ -392,7 +408,7 @@ def _preview_gemini_text(text_content, language_id):
         return text_content
 
 
-def _generate_with_verified(model, raw_text, verified, audio_prompt_path, exaggeration, temperature, seed_num, cfgw, lang, prosody_ctx, unk_ls, progress=gr.Progress(track_tqdm=True)):
+def _generate_with_verified(model, raw_text, verified, audio_prompt_path, exaggeration, temperature, seed_num, cfgw, lang, prosody_ctx, unk_ls, gemini_instruction, progress=gr.Progress(track_tqdm=True)):
     """Generate using the reviewed text box when filled; otherwise fall back to raw input.
     Skip re-normalization so the user's manually verified edits are preserved."""
     final = (verified or "").strip() or (raw_text or "")
@@ -403,7 +419,8 @@ def _generate_with_verified(model, raw_text, verified, audio_prompt_path, exagge
         model, final, audio_prompt_path, exaggeration, temperature, seed_num, cfgw,
         min_p=0.05, top_p=1.0, repetition_penalty=1.2,
         language_id=lang, use_unk_letterspace=unk_ls,
-        use_prosody_context=prosody_ctx, progress=progress, skip_rewrite=skip,
+        use_prosody_context=prosody_ctx, progress=progress,
+        skip_rewrite=skip, instruction=gemini_instruction,
     )
 
 
@@ -920,7 +937,7 @@ def _find_unk_words(model, text, language_id="en"):
     except Exception:
         return []
 
-def generate(model, text, audio_prompt_path, exaggeration, temperature, seed_num, cfgw, min_p=0.05, top_p=1.0, repetition_penalty=1.2, language_id="en", use_unk_letterspace=False, use_prosody_context=False, skip_rewrite=False, progress=gr.Progress(track_tqdm=True)):
+def generate(model, text, audio_prompt_path, exaggeration, temperature, seed_num, cfgw, min_p=0.05, top_p=1.0, repetition_penalty=1.2, language_id="en", use_unk_letterspace=False, use_prosody_context=False, skip_rewrite=False, instruction=None, progress=gr.Progress(track_tqdm=True)):
     if model is None:
         model = load_model(language_id)  # singleton: dedupes concurrent loads, never double-loads
 
@@ -951,7 +968,7 @@ def generate(model, text, audio_prompt_path, exaggeration, temperature, seed_num
     # skip_rewrite = the user already previewed + verified the Gemini output
     # manually in the review box — don't re-normalize their edits.
     if not skip_rewrite:
-        text, _used_gemini = gemini_rewrite(text, language_id)
+        text, _used_gemini = gemini_rewrite(text, language_id, instruction=instruction)
 
     # Stage 6 (opt-in): letter-space genuinely OOV words like a narrator would
     # (ক-ম-ল), instead of letting the model garble/skip them.
@@ -1645,7 +1662,8 @@ def create_audiobook(
     autosave_interval: int = 10,
     language_id: str = "en",
     progress=None,
-    natural: bool = False
+    natural: bool = False,
+    instruction: str = None
 ) -> tuple:
     """
     Create audiobook from text using selected voice with smart chunking, autosave every N chunks, and resume support.
@@ -1691,7 +1709,7 @@ def create_audiobook(
         text_content = bangla_normalize_text(text_content)
 
     # Optional AI normalization (Gemini, precise ruleset): digits → spoken Bangla
-    text_content, _used_gemini = gemini_rewrite(text_content, language_id)
+    text_content, _used_gemini = gemini_rewrite(text_content, language_id, instruction=instruction)
 
     # Bangla uses the Bangla-first engine: grapheme-cluster safe, token-budgeted,
     # with dari/॥/newline pause cues (pause_before → pause_duration for this loop).
@@ -5469,7 +5487,8 @@ def create_audiobook_with_original_voice_metadata(
     autosave_interval: int = 10,
     language_id: str = "en",
     progress=None,
-    natural: bool = False
+    natural: bool = False,
+    instruction: str = None
 ) -> tuple:
     """Create audiobook but save original voice name in metadata (for volume normalization)"""
     # This is a modified version of create_audiobook that preserves the original voice name in metadata
@@ -5544,7 +5563,7 @@ def create_audiobook_with_original_voice_metadata(
 
     # Optional AI normalization (Gemini, precise ruleset): digits → spoken Bangla.
     # It preserves [Name] tags so multi-voice routing still works downstream.
-    text_content, _used_gemini = gemini_rewrite(text_content, language_id)
+    text_content, _used_gemini = gemini_rewrite(text_content, language_id, instruction=instruction)
 
     if _is_bn:
         chunks_with_pauses = [{
@@ -5841,7 +5860,7 @@ def create_audiobook_with_original_voice_metadata(
     _session_add("TTS SINGLE", len(combined_audio) / _ssr, total_elapsed)
 
 def create_audiobook_with_volume_settings(model, text_content, voice_library_path, selected_voice, project_name, 
-                                         enable_norm=True, target_level=-18.0, language_id="en", progress=gr.Progress(track_tqdm=True), natural=False):
+                                         enable_norm=True, target_level=-18.0, language_id="en", instruction=None, natural=False, progress=gr.Progress(track_tqdm=True)):
     """Wrapper for create_audiobook that applies volume normalization settings"""
     # Get the voice config and temporarily apply volume settings
     voice_config = get_voice_config(voice_library_path, selected_voice)
@@ -5868,7 +5887,7 @@ def create_audiobook_with_volume_settings(model, text_content, voice_library_pat
         # Stream live yields through to the UI
         for item in create_audiobook_with_original_voice_metadata(
             model, text_content, voice_library_path, temp_voice_name, project_name, selected_voice,
-            language_id=language_id, progress=progress, natural=natural
+            language_id=language_id, progress=progress, natural=natural, instruction=instruction
         ):
             yield item
         
@@ -5878,7 +5897,7 @@ def create_audiobook_with_volume_settings(model, text_content, voice_library_pat
         except:
             pass
     else:
-        audio, status = create_audiobook(model, text_content, voice_library_path, selected_voice, project_name, language_id=language_id, progress=progress)
+        audio, status = create_audiobook(model, text_content, voice_library_path, selected_voice, project_name, language_id=language_id, progress=progress, instruction=instruction)
         yield (audio, status,
                "<div class='audiobook-status'>⏱️ Timing info will appear here...</div>",
                "", gr.update(value="⏸️ Pause"))
@@ -6285,7 +6304,10 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
     
     def _gemini_set_enabled(v):
         GEMINI_CFG["enabled"] = bool(v)
-        return gr.update(value="🤖 AI normalization: ON (Bangla)" if bool(v) else "🤖 AI normalization: OFF")
+        st = "🤖 AI normalization: ON (Bangla)" if bool(v) else "🤖 AI normalization: OFF (deterministic only)"
+        if _gemini_key():
+            st += " • key detected"
+        return gr.update(value=st)
 
     def _gemini_set_key(v):
         GEMINI_CFG["api_key"] = (v or "").strip()
@@ -6314,24 +6336,27 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
             "Raw Bangla text → **Gemini rewrites digits/currency/years/clock-times into "
             "spoken Bangla** using the project's Master-Prompt ruleset (or any custom "
             "prompt file you point at below). Long text is auto-chunked, so whole books "
-            "are normalized. **If it is off or fails, your text is used exactly as typed** "
-            "— this never breaks generation. A free key: "
-            "[Google AI Studio](https://aistudio.google.com/apikey)."
+            "are normalized. **ON by default whenever a key is detected** (type one here "
+            "or set `GEMINI_API_KEY` in the environment); uncheck to force it off. "
+            "If it fails, your text is used exactly as typed — this never breaks "
+            "generation. A free key: [Google AI Studio](https://aistudio.google.com/apikey). "
+            "Tip: use the '🎬 What should Gemini do?' box in the TTS tab so Gemini follows "
+            "exactly what you want (tone, tags to keep, things to never change)."
         )
         with gr.Row():
-            gemini_enable = gr.Checkbox(label="Enable (Bangla)", value=False,
-                                        info="For Bengali, numbers/currency/years become words before TTS")
+            gemini_enable = gr.Checkbox(label="Enable (Bangla)", value=True,
+                                        info="ON by default when a key is available. For Bengali, numbers/currency/years become words before TTS")
             gemini_api_key = gr.Textbox(label="Gemini API key", type="password",
                                         placeholder="AIza... (Google AI Studio)",
                                         info="Kept in memory only, never saved/logged")
             gemini_test_btn = gr.Button("Test", size="sm")
         with gr.Row():
-            default_prompt = str(Path(__file__).resolve().parent / "prompts" / "Bangla_Audiobook_Master_Language_Prompt_v4.txt")
+            default_prompt = str(Path(__file__).resolve().parent / "prompts" / "Bangla_Audiobook_Master_Language_Prompt_v5.txt")
             gemini_prompt_path = gr.Textbox(label="Normalization prompt file (.txt) — optional",
                                             value=default_prompt,
                                             placeholder="path/to/your_prompt.txt",
                                             info="Edit the file anytime; changes apply on the next Generate")
-        gemini_status = gr.Markdown("🤖 AI normalization: OFF")
+        gemini_status = gr.Markdown("🤖 AI normalization: ON (key auto-detected)" if _gemini_key() else "🤖 AI normalization: ON (no key yet — will auto-enable when a key is set)")
         gemini_live_status = gr.HTML(_render_gemini_live(), label="Gemini live activity")
         gemini_enable.change(fn=_gemini_set_enabled, inputs=[gemini_enable], outputs=[gemini_status])
         gemini_api_key.change(fn=_gemini_set_key, inputs=[gemini_api_key], outputs=[])
@@ -6359,6 +6384,14 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
                         interactive=True
                     )
                     preview_btn = gr.Button("🔍 Preview Gemini Rewrite", size="sm")
+                    gemini_instruction = gr.Textbox(
+                        value="",
+                        label="🎬 What should Gemini do? (optional)",
+                        lines=2,
+                        placeholder="e.g. Keep my [Name] tags, dramatic storytelling tone, never translate, don't change my words beyond numbers → always final Bangla only.",
+                        info="Sent to Gemini with your ruleset. Tells the AI exactly what you want — it follows this over default style, but can never break preservation rules.",
+                        interactive=True
+                    )
                     
                     # Voice Selection Section
                     with gr.Group():
@@ -6701,6 +6734,14 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
                                     lines=12,
                                     max_lines=20,
                                     info="Text will be split into chunks at sentence boundaries"
+                                )
+                                gemini_instruction_single = gr.Textbox(
+                                    value="",
+                                    label="🎬 What should Gemini do? (optional, Bangla only)",
+                                    lines=2,
+                                    placeholder="e.g. Dramatic narrator tone, keep character tags, no rewriting beyond numbers → always final Bangla.",
+                                    info="Sent to Gemini for Bangla projects. Highest priority style/do/don't; preservation rules still apply.",
+                                    interactive=True
                                 )
                             
                             with gr.Column(scale=1):
@@ -7914,13 +7955,14 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
             tts_language,
             use_prosody_ctx,
             use_unk_letterspace,
+            gemini_instruction,
         ],
         outputs=audio_output,
     ).then(
         save_tts_for_download, inputs=[audio_output, tts_voice_selector, tts_language], outputs=[tts_download]
     )
 
-    preview_btn.click(fn=_preview_gemini_text, inputs=[text, tts_language], outputs=[verified_text])
+    preview_btn.click(fn=_preview_gemini_text, inputs=[text, tts_language, gemini_instruction], outputs=[verified_text])
 
     # Voice Conversion Functions
     
@@ -8126,7 +8168,7 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
     # Enhanced Audiobook Creation with chunking and saving
     process_btn.click(
         fn=create_audiobook_with_volume_settings,
-        inputs=[model_state, audiobook_text, voice_library_path_state, audiobook_voice_selector, project_name, enable_volume_norm, target_volume_level, audiobook_language],
+        inputs=[model_state, audiobook_text, voice_library_path_state, audiobook_voice_selector, project_name, enable_volume_norm, target_volume_level, audiobook_language, gemini_instruction_single],
         outputs=[audiobook_output, audiobook_status, audiobook_timing, audiobook_chunktxt, single_pause_btn]
     ).then(
         fn=force_refresh_all_project_dropdowns,

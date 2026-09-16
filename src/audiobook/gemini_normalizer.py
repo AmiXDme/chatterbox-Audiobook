@@ -43,7 +43,7 @@ def _live(**kw):
     GEMINI_LIVE["ts"] = time.time()
 
 # Where the project keeps its canonical normalization prompt.
-DEFAULT_PROMPT_FILE = Path(__file__).resolve().parent.parent.parent / "prompts" / "Bangla_Audiobook_Master_Language_Prompt_v4.txt"
+DEFAULT_PROMPT_FILE = Path(__file__).resolve().parent.parent.parent / "prompts" / "Bangla_Audiobook_Master_Language_Prompt_v5.txt"
 
 # Compact fallback used only when no prompt file is readable (never crashes).
 _FALLBACK_PROMPT = """You are a Bangla (Bengali) audiobook text normalizer. You convert "raw" Bangla text into spoken Bangla text so a text-to-speech voice reads it correctly.
@@ -152,12 +152,20 @@ def _chunk_text(text: str, max_chars: int = MAX_INPUT_CHARS):
     return chunks or [text]
 
 
-def _call_gemini(prompt: str, api_key: str, timeout: float = 90.0) -> str:
+def _call_gemini(prompt: str, api_key: str, timeout: float = 90.0,
+                 instruction: str = None) -> str:
+    system = get_system_prompt()
+    if instruction and instruction.strip():
+        # User request outranks style defaults but NEVER bypasses the
+        # preservation gates ([Name] tags, no re-language, no renumbering).
+        system += ("\n\nUSER REQUEST — WHAT THE USER WANTS (follow it as your "
+                   "highest priority WITHOUT breaking the preservation rules "
+                   "above):\n" + instruction.strip())
     body = {
         "contents": [
             {
                 "role": "user",
-                "parts": [{"text": get_system_prompt() + "\n\n" + prompt}],
+                "parts": [{"text": system + "\n\n" + prompt}],
             }
         ],
         "generationConfig": {
@@ -205,13 +213,15 @@ def _call_gemini(prompt: str, api_key: str, timeout: float = 90.0) -> str:
     return parts[0]["text"]
 
 
-def gemini_normalize(raw_text: str, api_key: str, model: str = MODEL, timeout: float = 90.0) -> str:
+def gemini_normalize(raw_text: str, api_key: str, model: str = MODEL,
+                     timeout: float = 90.0, instruction: str = None) -> str:
     """Send raw Bangla text to Gemini with the active ruleset; return spoken text.
 
-    Long input is chunked at sentence boundaries and each chunk normalized, so
-    whole audiobooks work. Preserves [Name] tags/URLs so multi-voice routing
-    still works downstream. Raises RuntimeError on any failure — the caller
-    decides the fallback.
+    instruction: optional free-form "what the user wants" (tone/style/do-don't)
+    appended to the ruleset as highest-priority guidance. Long input is chunked
+    at sentence boundaries and each chunk normalized, so whole audiobooks work.
+    Preserves [Name] tags/URLs so multi-voice routing still works downstream.
+    Raises RuntimeError on any failure — the caller decides the fallback.
     """
     if not api_key_ok(api_key):
         raise RuntimeError("No valid Gemini API key (must start with 'AIza')")
@@ -232,7 +242,8 @@ def gemini_normalize(raw_text: str, api_key: str, model: str = MODEL, timeout: f
     try:
         if total <= 1:
             _live(step=f"Sending {len(raw_text)} chars to {model}…", detail="single chunk")
-            result = _call_gemini(raw_text, api_key, timeout=timeout).strip()
+            result = _call_gemini(raw_text, api_key, timeout=timeout,
+                                  instruction=instruction).strip()
             if not result:
                 raise RuntimeError("Gemini returned empty text")
             print(f"[GEMINI] ✅ {len(raw_text)} → {len(result)} chars in {GEMINI_LIVE['latency']}s", flush=True)
@@ -242,7 +253,8 @@ def gemini_normalize(raw_text: str, api_key: str, model: str = MODEL, timeout: f
             _live(step=f"Chunk {i}/{total} • sending {len(chunk)} chars to {model}…",
                   chunk=i, total=total)
             t_c = time.time()
-            result = _call_gemini(chunk, api_key, timeout=timeout).strip()
+            result = _call_gemini(chunk, api_key, timeout=timeout,
+                                  instruction=instruction).strip()
             if not result:
                 raise RuntimeError(f"Gemini returned empty text for chunk {i}/{total}")
             lat = GEMINI_LIVE["latency"]
