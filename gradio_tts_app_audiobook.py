@@ -1641,13 +1641,33 @@ def create_audiobook(
         return None, f"❌ No audio file found for voice '{voice_config['display_name']}'"
 
     # Import pause processing functions
-    from src.audiobook.processing import chunk_text_with_line_break_priority, create_silence_audio
+    from src.audiobook.processing import (
+        chunk_text_with_line_break_priority, create_silence_audio,
+        unicode_repair_bangla, bangla_normalize_text, bangla_chunk_text,
+    )
+
+    # Bangla: deterministic engine FIRST (NFC repair + digits/currency/clock/…),
+    # then Gemini — mirrors the quick-TTS path so Gemini sees letters, never digit
+    # shapes. Non-Bangla text passes through untouched.
+    _is_bn = str(language_id).lower().startswith("bn")
+    if _is_bn:
+        text_content = unicode_repair_bangla(text_content)
+        text_content = bangla_normalize_text(text_content)
 
     # Optional AI normalization (Gemini, precise ruleset): digits → spoken Bangla
     text_content, _used_gemini = gemini_rewrite(text_content, language_id)
 
-    # Chunk text with line breaks taking priority over sentence breaks
-    chunks_with_pauses, total_pause_duration = chunk_text_with_line_break_priority(text_content, max_words=50, pause_duration=0.1)
+    # Bangla uses the Bangla-first engine: grapheme-cluster safe, token-budgeted,
+    # with dari/॥/newline pause cues (pause_before → pause_duration for this loop).
+    if _is_bn:
+        chunks_with_pauses = [{
+            'text': _bk['text'],
+            'pause_duration': float(_bk.get('pause_before') or 0.0),
+        } for _bk in bangla_chunk_text(text_content, max_tokens=850)]
+        total_pause_duration = sum(c['pause_duration'] for c in chunks_with_pauses)
+    else:
+        # Chunk text with line breaks taking priority over sentence breaks
+        chunks_with_pauses, total_pause_duration = chunk_text_with_line_break_priority(text_content, max_words=50, pause_duration=0.1)
     
     # Extract just the text parts for processing
     chunks = [chunk_data['text'] for chunk_data in chunks_with_pauses]
@@ -2572,9 +2592,13 @@ def create_multi_voice_audiobook_with_assignments(
     # Import pause processing functions
     from src.audiobook.processing import chunk_multi_voice_text_with_line_break_priority, create_silence_audio
 
-    # RAW text goes in: voice tags are split first inside the chunker, then
-    # each voice block is protected/normalized/restored independently.
-    # (Pre-protecting here would hide [Character] tags from the splitter.)
+    # RAW text goes in: deterministic engine first (BN only) — [Name] tags carry
+    # no digits/punct so they survive untouched — then voice tags are split and
+    # each voice block is chunked Bangla-aware inside the chunker.
+    if str(language_id).lower().startswith("bn"):
+        from src.audiobook.processing import unicode_repair_bangla, bangla_normalize_text
+        text_content = unicode_repair_bangla(text_content)
+        text_content = bangla_normalize_text(text_content)
     initial_max_words = 40
     segments_with_pauses, total_pause_duration = chunk_multi_voice_text_with_line_break_priority(
         text_content, max_words=initial_max_words, pause_duration=0.1,
@@ -5469,14 +5493,32 @@ def create_audiobook_with_original_voice_metadata(
             print(f"🔄 Resuming project with {len(existing_chunks)} existing chunks")
     
     # Import pause processing functions
-    from src.audiobook.processing import chunk_text_with_line_break_priority, create_silence_audio
+    from src.audiobook.processing import (
+        chunk_text_with_line_break_priority, create_silence_audio,
+        unicode_repair_bangla, bangla_normalize_text, bangla_chunk_text,
+    )
+
+    # Bangla: deterministic engine FIRST (NFC + digits/currency/clock/…), then
+    # Gemini. [Name] tags carry no digits/punct, so both preserve them for the
+    # multi-voice routing downstream.
+    _is_bn = str(language_id).lower().startswith("bn")
+    if _is_bn:
+        text_content = unicode_repair_bangla(text_content)
+        text_content = bangla_normalize_text(text_content)
 
     # Optional AI normalization (Gemini, precise ruleset): digits → spoken Bangla.
     # It preserves [Name] tags so multi-voice routing still works downstream.
     text_content, _used_gemini = gemini_rewrite(text_content, language_id)
 
-    # Chunk text with line breaks taking priority over sentence breaks
-    chunks_with_pauses, total_pause_duration = chunk_text_with_line_break_priority(text_content, max_words=50, pause_duration=0.1)
+    if _is_bn:
+        chunks_with_pauses = [{
+            'text': _bk['text'],
+            'pause_duration': float(_bk.get('pause_before') or 0.0),
+        } for _bk in bangla_chunk_text(text_content, max_tokens=850)]
+        total_pause_duration = sum(c['pause_duration'] for c in chunks_with_pauses)
+    else:
+        # Chunk text with line breaks taking priority over sentence breaks
+        chunks_with_pauses, total_pause_duration = chunk_text_with_line_break_priority(text_content, max_words=50, pause_duration=0.1)
     
     # Extract just the text parts for processing
     chunks = [chunk_data['text'] for chunk_data in chunks_with_pauses]

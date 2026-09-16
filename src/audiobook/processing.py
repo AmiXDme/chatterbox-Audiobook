@@ -898,6 +898,19 @@ def process_voice_content_with_line_breaks(voice_name: str, content: str, max_wo
         content, _pctx = protect_all(content, language_id, natural=natural)
         content = normalize_text(content, language_id, symbols=not natural)
 
+    # Bangla: use the Bangla-first engine (grapheme-cluster safe, token-budgeted,
+    # dari/॥/blank-line/soft-return pause cues preserved from raw \n). The classic
+    # word-count split below stays for other languages.
+    if language_id is not None and str(language_id).lower().startswith("bn"):
+        for _bk in bangla_chunk_text(content, max_tokens=850):
+            if _bk.get("text"):
+                segments.append({
+                    'voice': voice_name,
+                    'text': _bk["text"].strip(),
+                    'pause_duration': float(_bk.get("pause_before") or 0.0),
+                })
+        return segments
+
     # Split content by line breaks, keeping the line breaks
     line_segments = re.split(r'(\n+)', content)
     
