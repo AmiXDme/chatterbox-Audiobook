@@ -1213,13 +1213,18 @@ def _bn_ordinal(num, suffix):
         return basic.get(n, _bn_num_words(n) + 'র্থ')
     if suffix in ('য়', 'তম'):
         return basic.get(n, _bn_num_words(n) + 'তম')
+    if suffix == 'শে':
+        return _bn_num_words(n) + 'ে'
     if suffix in ('লা', 'রা', 'ঠা', 'ই'):
         return date_form.get(n, _bn_num_words(n) + 'ই')
     return _bn_num_words(n)
 
 
 def _bn_time_words(hour, minute, has_am_pm, am_pm):
-    """Clock phrase: 7:30 -> সাড়ে সাতটা, 1:30 -> দেড়টা, 6:05 -> ছয়টা পাঁচ মিনিট."""
+    """Clock phrase: 7:30 -> সাড়ে সাতটা, 1:30 -> দেড়টা, 6:23 -> ছয়টা বেজে তেইশ মিনিট,
+    6:40 -> সাতটা বাজতে বিশ মিনিট বাকি. Standard hour stems retained; durations
+    never use ঘণ্টা.
+    """
     h = int(_bn_to_ascii_digits(str(hour)))
     m = int(_bn_to_ascii_digits(str(minute)))
     if not (0 <= h <= 24 and 0 <= m <= 59):
@@ -1238,8 +1243,11 @@ def _bn_time_words(hour, minute, has_am_pm, am_pm):
     elif m == 45:
         nxt = (h % 12) + 1
         phrase = 'পৌনে ' + _bn_num_words(nxt) + 'টা'
+    elif m <= 30:
+        phrase = _bn_num_words(h12) + 'টা বেজে ' + _bn_num_words(m) + ' মিনিট'
     else:
-        phrase = _bn_num_words(h12) + ' ঘণ্টা ' + _bn_num_words(m) + ' মিনিট'
+        nxt = (h12 % 12) + 1
+        phrase = _bn_num_words(nxt) + 'টা বাজতে ' + _bn_num_words(60 - m) + ' মিনিট বাকি'
     if not has_am_pm:
         return phrase
     if am_pm and am_pm.lower() in ('am', 'pm'):
@@ -1247,8 +1255,10 @@ def _bn_time_words(hour, minute, has_am_pm, am_pm):
             daypart = 'ভোরে'
         elif h < 12:
             daypart = 'সকালে'
-        elif h < 17:
+        elif h < 15:
             daypart = 'দুপুরে'
+        elif h < 18:
+            daypart = 'বিকালে'
         elif h < 20:
             daypart = 'সন্ধ্যায়'
         else:
@@ -1322,7 +1332,7 @@ def bangla_normalize_text(text):
     )
 
     text = re.sub(
-        r'([0-9০-৯]{1,2})(ম|য়|র্থ|লা|রা|ঠা|ই|তম)',
+        r'([0-9০-৯]{1,2})(ম|য়|র্থ|লা|রা|ঠা|ই|শে|তম)',
         lambda m: _bn_ordinal(m.group(1), m.group(2)),
         text,
     )

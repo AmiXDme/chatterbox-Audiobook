@@ -374,6 +374,39 @@ def gemini_rewrite(text, language_id):
         return text, False
 
 
+def _preview_gemini_text(text_content, language_id):
+    """Preview the exact normalized text TTS will use (same code path as generate).
+    Runs the deterministic engine then Gemini, so the shown text is byte-identical
+    to what would be generated. Non-Bangla / Gemini-off → reflects input as-is."""
+    if not text_content or not str(language_id or "").lower().startswith("bn"):
+        return text_content or ""
+    try:
+        from src.audiobook.processing import unicode_repair_bangla, bangla_normalize_text
+        t = unicode_repair_bangla(text_content)
+        t = bangla_normalize_text(t)
+        out, _used = gemini_rewrite(t, language_id)
+        print(f"🔍 [PREVIEW] Gemini rewrite preview ready ({_used and 'Gemini used' or 'Gemini not used, deterministic only'}).", flush=True)
+        return out
+    except Exception as e:
+        print(f"🔍 [PREVIEW] Skipped ({e}) → used text as typed.", flush=True)
+        return text_content
+
+
+def _generate_with_verified(model, raw_text, verified, audio_prompt_path, exaggeration, temperature, seed_num, cfgw, lang, prosody_ctx, unk_ls, progress=gr.Progress(track_tqdm=True)):
+    """Generate using the reviewed text box when filled; otherwise fall back to raw input.
+    Skip re-normalization so the user's manually verified edits are preserved."""
+    final = (verified or "").strip() or (raw_text or "")
+    skip = bool((verified or "").strip())
+    if skip and final != raw_text:
+        print("🟢 [TTS] Using verified text (Gemini preview checked by you).", flush=True)
+    return generate(
+        model, final, audio_prompt_path, exaggeration, temperature, seed_num, cfgw,
+        min_p=0.05, top_p=1.0, repetition_penalty=1.2,
+        language_id=lang, use_unk_letterspace=unk_ls,
+        use_prosody_context=prosody_ctx, progress=progress, skip_rewrite=skip,
+    )
+
+
 def _rss_mb():
     """Current process RAM in MB (Linux /proc, fallback 0)."""
     try:
@@ -887,7 +920,7 @@ def _find_unk_words(model, text, language_id="en"):
     except Exception:
         return []
 
-def generate(model, text, audio_prompt_path, exaggeration, temperature, seed_num, cfgw, min_p=0.05, top_p=1.0, repetition_penalty=1.2, language_id="en", use_unk_letterspace=False, use_prosody_context=False, progress=gr.Progress(track_tqdm=True)):
+def generate(model, text, audio_prompt_path, exaggeration, temperature, seed_num, cfgw, min_p=0.05, top_p=1.0, repetition_penalty=1.2, language_id="en", use_unk_letterspace=False, use_prosody_context=False, skip_rewrite=False, progress=gr.Progress(track_tqdm=True)):
     if model is None:
         model = load_model(language_id)  # singleton: dedupes concurrent loads, never double-loads
 
@@ -914,8 +947,11 @@ def generate(model, text, audio_prompt_path, exaggeration, temperature, seed_num
         text = unicode_repair_bangla(text)
         text = bangla_digit_normalize(text)
 
-    # Optional AI normalization (Gemini, precise ruleset): digits → spoken Bangla
-    text, _used_gemini = gemini_rewrite(text, language_id)
+    # Optional AI normalization (Gemini, precise ruleset): digits → spoken Bangla.
+    # skip_rewrite = the user already previewed + verified the Gemini output
+    # manually in the review box — don't re-normalize their edits.
+    if not skip_rewrite:
+        text, _used_gemini = gemini_rewrite(text, language_id)
 
     # Stage 6 (opt-in): letter-space genuinely OOV words like a narrator would
     # (ক-ম-ল), instead of letting the model garble/skip them.
@@ -6313,6 +6349,16 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
                         label="Text to synthesize",
                         lines=3
                     )
+
+                    # Verified-text loop: Gemini preview → user review → TTS uses this box.
+                    verified_text = gr.Textbox(
+                        value="",
+                        label="✅ Verified text (Gemini preview) — used for generation if filled",
+                        lines=3,
+                        placeholder="Click 'Preview Gemini Rewrite'. You can edit this text — Generate will then use it as-is, without re-normalizing.",
+                        interactive=True
+                    )
+                    preview_btn = gr.Button("🔍 Preview Gemini Rewrite", size="sm")
                     
                     # Voice Selection Section
                     with gr.Group():
@@ -7855,15 +7901,11 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
 
     # TTS Generation
     run_btn.click(
-        fn=lambda model, text, audio, exag, temp, seed, cfgw, lang, prosody_ctx, unk_ls, progress=gr.Progress(track_tqdm=True): generate(
-            model, text, audio, exag, temp, seed, cfgw,
-            min_p=0.05, top_p=1.0, repetition_penalty=1.2,
-            language_id=lang, use_unk_letterspace=unk_ls,
-            use_prosody_context=prosody_ctx, progress=progress
-        ),
+        fn=_generate_with_verified,
         inputs=[
             model_state,
             text,
+            verified_text,
             ref_wav,
             exaggeration,
             temp,
@@ -7877,6 +7919,8 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
     ).then(
         save_tts_for_download, inputs=[audio_output, tts_voice_selector, tts_language], outputs=[tts_download]
     )
+
+    preview_btn.click(fn=_preview_gemini_text, inputs=[text, tts_language], outputs=[verified_text])
 
     # Voice Conversion Functions
     
