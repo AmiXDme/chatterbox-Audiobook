@@ -153,7 +153,8 @@ def _chunk_text(text: str, max_chars: int = MAX_INPUT_CHARS):
 
 
 def _call_gemini(prompt: str, api_key: str, timeout: float = 90.0,
-                 instruction: str = None) -> str:
+                 instruction: str = None, original: str = None,
+                 original_shown: bool = False) -> str:
     system = get_system_prompt()
     if instruction and instruction.strip():
         # User request outranks style defaults but NEVER bypasses the
@@ -161,11 +162,28 @@ def _call_gemini(prompt: str, api_key: str, timeout: float = 90.0,
         system += ("\n\nUSER REQUEST — WHAT THE USER WANTS (follow it as your "
                    "highest priority WITHOUT breaking the preservation rules "
                    "above):\n" + instruction.strip())
+    user_words = [system.replace("USER REQUEST — WHAT THE USER WANTS",
+                                 "USER REQUEST — WHAT THE USER WANTS (a block with this "
+                                 "exact label may follow ORIGINAL INPUT below)")]
+    if original and original.strip() and not original_shown:
+        # The user's own input AND the local engine's output, side by side:
+        # analyze both, treat the LOCAL output as the canonical base (digits/
+        # currency/dates/clock already spoken), fix only what is clearly wrong.
+        user_words.append(
+            "USER ORIGINAL INPUT — the raw text the user typed. Analyze it AND "
+            "compare it against the LOCAL ENGINE OUTPUT below:\n"
+            + original
+            + "\n\nLOCAL ENGINE OUTPUT — ALREADY normalized deterministically by the "
+              "local engine (digits/currency/years/dates/clock → spoken Bangla). "
+              "This is the canonical BASE. Preserve it except where clearly wrong "
+              "or where the USER REQUEST says otherwise:\n"
+        )
+    user_words.append(prompt)
     body = {
         "contents": [
             {
                 "role": "user",
-                "parts": [{"text": system + "\n\n" + prompt}],
+                "parts": [{"text": w} for w in user_words],
             }
         ],
         "generationConfig": {
@@ -214,14 +232,20 @@ def _call_gemini(prompt: str, api_key: str, timeout: float = 90.0,
 
 
 def gemini_normalize(raw_text: str, api_key: str, model: str = MODEL,
-                     timeout: float = 90.0, instruction: str = None) -> str:
+                     timeout: float = 90.0, instruction: str = None,
+                     original: str = None) -> str:
     """Send raw Bangla text to Gemini with the active ruleset; return spoken text.
 
     instruction: optional free-form "what the user wants" (tone/style/do-don't)
-    appended to the ruleset as highest-priority guidance. Long input is chunked
-    at sentence boundaries and each chunk normalized, so whole audiobooks work.
-    Preserves [Name] tags/URLs so multi-voice routing still works downstream.
-    Raises RuntimeError on any failure — the caller decides the fallback.
+    appended to the ruleset as highest-priority guidance.
+    original: optional raw text the user typed (pre-deterministic). When given,
+    Gemini sees BOTH the original input and the local engine's already-
+    normalized output, and uses the local output as the canonical base. Sent
+    once with the first chunk; later chunks note the same original.
+    Long input is chunked at sentence boundaries and each chunk normalized, so
+    whole audiobooks work. Preserves [Name] tags/URLs so multi-voice routing
+    still works downstream. Raises RuntimeError on any failure — the caller
+    decides the fallback.
     """
     if not api_key_ok(api_key):
         raise RuntimeError("No valid Gemini API key (must start with 'AIza')")
@@ -243,7 +267,7 @@ def gemini_normalize(raw_text: str, api_key: str, model: str = MODEL,
         if total <= 1:
             _live(step=f"Sending {len(raw_text)} chars to {model}…", detail="single chunk")
             result = _call_gemini(raw_text, api_key, timeout=timeout,
-                                  instruction=instruction).strip()
+                                  instruction=instruction, original=original).strip()
             if not result:
                 raise RuntimeError("Gemini returned empty text")
             print(f"[GEMINI] ✅ {len(raw_text)} → {len(result)} chars in {GEMINI_LIVE['latency']}s", flush=True)
@@ -254,7 +278,8 @@ def gemini_normalize(raw_text: str, api_key: str, model: str = MODEL,
                   chunk=i, total=total)
             t_c = time.time()
             result = _call_gemini(chunk, api_key, timeout=timeout,
-                                  instruction=instruction).strip()
+                                  instruction=instruction, original=original,
+                                  original_shown=(i > 1)).strip()
             if not result:
                 raise RuntimeError(f"Gemini returned empty text for chunk {i}/{total}")
             lat = GEMINI_LIVE["latency"]

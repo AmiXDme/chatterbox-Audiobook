@@ -356,10 +356,14 @@ def _gemini_key():
     return os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or ""
 
 
-def gemini_rewrite(text, language_id, instruction=None):
+def gemini_rewrite(text, language_id, instruction=None, original=None):
     """Precise AI normalization for Bangla. Returns (text, used_gemini). Safe.
     Enabled by default when a key is available (env or the UI box); the UI
-    checkbox can still force it off. instruction = 'what the user wants'."""
+    checkbox can still force it off.
+    instruction = 'what the user wants'.
+    original = the raw text the user typed BEFORE the local deterministic
+               engine — Gemini then analyzes BOTH (your input + the local
+               output) and takes the local output as the canonical base."""
     if not GEMINI_CFG.get("enabled", True):
         return text, False
     key = _gemini_key()
@@ -380,8 +384,8 @@ def gemini_rewrite(text, language_id, instruction=None):
             return text, False
         set_prompt_file(GEMINI_CFG.get("prompt_path"))
         n = len(text)
-        print(f"🤖 [GEMINI] Normalizing Bangla text ({n} chars)...", flush=True)
-        out = gemini_normalize(text, key, instruction=instruction)
+        print(f"🤖 [GEMINI] Normalizing Bangla text ({n} chars, dual-input {'ON' if original else 'off'})...", flush=True)
+        out = gemini_normalize(text, key, instruction=instruction, original=original)
         print(f"🤖 [GEMINI] Done → {len(out)} chars (was {n}).", flush=True)
         print(f"🤖 [GEMINI] Normalized: {out[:400]}{'…' if len(out) > 400 else ''}", flush=True)
         return out, True
@@ -392,20 +396,22 @@ def gemini_rewrite(text, language_id, instruction=None):
 
 def _preview_gemini_text(text_content, language_id, gemini_instruction=None):
     """Preview the exact normalized text TTS will use (same code path as generate).
-    Runs the deterministic engine then Gemini, so the shown text is byte-identical
-    to what would be generated. Non-Bangla / Gemini-off → reflects input as-is."""
+    Returns BOTH texts: (local engine output, Gemini output). The local box shows
+    the deterministic engine; the Gemini box shows what Gemini returned after
+    analyzing your original input AND the local output. Non-Bangla / Gemini-off
+    reflects input as-is."""
     if not text_content or not str(language_id or "").lower().startswith("bn"):
-        return text_content or ""
+        return (text_content or ""), (text_content or "")
     try:
         from src.audiobook.processing import unicode_repair_bangla, bangla_normalize_text
         t = unicode_repair_bangla(text_content)
-        t = bangla_normalize_text(t)
-        out, _used = gemini_rewrite(t, language_id, instruction=gemini_instruction)
-        print(f"🔍 [PREVIEW] Gemini rewrite preview ready ({_used and 'Gemini used' or 'Gemini not used, deterministic only'}).", flush=True)
-        return out
+        t_local = bangla_normalize_text(t)
+        out, _used = gemini_rewrite(t_local, language_id, instruction=gemini_instruction, original=text_content)
+        print(f"🔍 [PREVIEW] Local deterministic → {len(t_local)} chars; Gemini {'used' if _used else 'not used'} → {len(out)} chars.", flush=True)
+        return out, t_local
     except Exception as e:
         print(f"🔍 [PREVIEW] Skipped ({e}) → used text as typed.", flush=True)
-        return text_content
+        return (text_content or ""), (text_content or "")
 
 
 def _generate_with_verified(model, raw_text, verified, audio_prompt_path, exaggeration, temperature, seed_num, cfgw, lang, prosody_ctx, unk_ls, gemini_instruction, progress=gr.Progress(track_tqdm=True)):
@@ -960,6 +966,7 @@ def generate(model, text, audio_prompt_path, exaggeration, temperature, seed_num
     # Stage 0+1 (Bangla): unicode repair (NFC, drop ZWJ/ZWNJ joiners) + deterministic
     # digit normalization (lakh/crore grouping) — run BEFORE Gemini so the language
     # model sees letters, never digit shapes, and the dari/nasal markers survive.
+    _orig_input = text
     if is_bn:
         text = unicode_repair_bangla(text)
         text = bangla_digit_normalize(text)
@@ -968,7 +975,7 @@ def generate(model, text, audio_prompt_path, exaggeration, temperature, seed_num
     # skip_rewrite = the user already previewed + verified the Gemini output
     # manually in the review box — don't re-normalize their edits.
     if not skip_rewrite:
-        text, _used_gemini = gemini_rewrite(text, language_id, instruction=instruction)
+        text, _used_gemini = gemini_rewrite(text, language_id, instruction=instruction, original=_orig_input)
 
     # Stage 6 (opt-in): letter-space genuinely OOV words like a narrator would
     # (ক-ম-ল), instead of letting the model garble/skip them.
@@ -1702,14 +1709,15 @@ def create_audiobook(
 
     # Bangla: deterministic engine FIRST (NFC repair + digits/currency/clock/…),
     # then Gemini — mirrors the quick-TTS path so Gemini sees letters, never digit
-    # shapes. Non-Bangla text passes through untouched.
+    # shapes. Gemini ALSO receives the original input so it can analyze both.
     _is_bn = str(language_id).lower().startswith("bn")
+    _orig_input = text_content
     if _is_bn:
         text_content = unicode_repair_bangla(text_content)
         text_content = bangla_normalize_text(text_content)
 
     # Optional AI normalization (Gemini, precise ruleset): digits → spoken Bangla
-    text_content, _used_gemini = gemini_rewrite(text_content, language_id, instruction=instruction)
+    text_content, _used_gemini = gemini_rewrite(text_content, language_id, instruction=instruction, original=_orig_input if _is_bn else None)
 
     # Bangla uses the Bangla-first engine: grapheme-cluster safe, token-budgeted,
     # with dari/॥/newline pause cues (pause_before → pause_duration for this loop).
@@ -5555,15 +5563,16 @@ def create_audiobook_with_original_voice_metadata(
 
     # Bangla: deterministic engine FIRST (NFC + digits/currency/clock/…), then
     # Gemini. [Name] tags carry no digits/punct, so both preserve them for the
-    # multi-voice routing downstream.
+    # multi-voice routing downstream. Gemini also sees the original input.
     _is_bn = str(language_id).lower().startswith("bn")
+    _orig_input = text_content
     if _is_bn:
         text_content = unicode_repair_bangla(text_content)
         text_content = bangla_normalize_text(text_content)
 
     # Optional AI normalization (Gemini, precise ruleset): digits → spoken Bangla.
     # It preserves [Name] tags so multi-voice routing still works downstream.
-    text_content, _used_gemini = gemini_rewrite(text_content, language_id, instruction=instruction)
+    text_content, _used_gemini = gemini_rewrite(text_content, language_id, instruction=instruction, original=_orig_input if _is_bn else None)
 
     if _is_bn:
         chunks_with_pauses = [{
@@ -6378,10 +6387,17 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
                     # Verified-text loop: Gemini preview → user review → TTS uses this box.
                     verified_text = gr.Textbox(
                         value="",
-                        label="✅ Verified text (Gemini preview) — used for generation if filled",
+                        label="✅ Gemini output (preview) — used for generation if filled",
                         lines=3,
                         placeholder="Click 'Preview Gemini Rewrite'. You can edit this text — Generate will then use it as-is, without re-normalizing.",
                         interactive=True
+                    )
+                    local_text_box = gr.Textbox(
+                        value="",
+                        label="🇧🇩 Local engine output (deterministic — digits/currency/dates/clock → words)",
+                        lines=3,
+                        interactive=False,
+                        placeholder="Click 'Preview Gemini Rewrite' to see what the local engine produced before Gemini."
                     )
                     preview_btn = gr.Button("🔍 Preview Gemini Rewrite", size="sm")
                     gemini_instruction = gr.Textbox(
@@ -7962,7 +7978,7 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
         save_tts_for_download, inputs=[audio_output, tts_voice_selector, tts_language], outputs=[tts_download]
     )
 
-    preview_btn.click(fn=_preview_gemini_text, inputs=[text, tts_language, gemini_instruction], outputs=[verified_text])
+    preview_btn.click(fn=_preview_gemini_text, inputs=[text, tts_language, gemini_instruction], outputs=[verified_text, local_text_box])
 
     # Voice Conversion Functions
     
