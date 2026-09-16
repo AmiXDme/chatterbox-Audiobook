@@ -22,7 +22,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-MODEL = "gemini-2.5-flash"
+MODEL = "gemini-2.5-flash"  # thinking model — use thinkingConfig for step-by-step reasoning
 ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
 MAX_INPUT_CHARS = 30000
 
@@ -160,18 +160,43 @@ def _call_gemini(prompt: str, api_key: str, timeout: float = 90.0,
         # The user wants REAL Bangla correction: Gemini analyzes the text with
         # its full Bangla knowledge and fixes grammar/vocabulary/flow, scoped so
         # meaning, order, count, [Name] tags, and canonical number forms survive.
+        # Based on the AI-Grammar-Fixer enterprise linguistic framework.
         system += """
 \n\nGRAMMAR-FIX MANDATE — the user wants you to REALLY ANALYZE the Bangla and fix it:
-- Correct grammatical errors: case/vibhakti (কারক), tense (কাল), subject-verb
-  agreement (পুরুষ-বচন), postpositions (কর্ম-প্রবচনীয়), particles (রা-কে-এ),
-  spelling variants, and non-native/transliterated constructions.
-- Improve awkward phrasing ONLY where it makes the Bangla more correct/natural.
-- KEEP: the meaning, every fact, the number and order of sentences, every
-  [Name]/tag/url byte-for-byte, and the canonical spoken-number forms the local
-  layer already produced (ক-৩.১৪, শূন্য, এক হাজার টাকা — never re-digitize, never
-  re-choose a different numeral word unless it is a GRAMMAR-mandated change).
-- NEVER translate to another language, never add/remove content, never rename.
-- Output final corrected Bangla only, same sentence count, same order."""
+
+## CORE ANALYSIS (apply ALL layers):
+
+### 1. ORTHOGRAPHIC + MORPHOLOGICAL
+- Spelling variants (e.g. গেছে → গিয়েছি for subject agreement)
+- Correct compound conjuncts, vowel matras, hasanta usage
+- Proper sandhi (সন্ধি) between words
+- Encoding artifacts: ensure no Unicode corruption
+
+### 2. SYNTACTIC (sentence structure)
+- Subject-verb agreement (person/number/honorific: আমি→গিয়েছি, তুমি→করেছিলে, সে→করেছিল)
+- Correct vibhakti (কারক) case markers: তোমাকে / তাকে / তার / তোমার
+- Postposition accuracy: সাথে/থেকে/নিকট/দিকে
+- Clause organization and phrase ordering
+- Preserve the author's natural voice/tone
+
+### 3. LEXICAL OPTIMIZATION
+- Word choice precision (avoid awkward transliterations)
+- Conciseness: eliminate redundancy while preserving meaning
+- Register appropriateness (colloquial/literary/formal as matches context)
+
+### 4. CONTEXTUAL INTELLIGENCE
+- Infer genre (narrative, dialogue, news, poetry) and apply domain conventions
+- Respect cultural expressions and idioms
+- Preserve specialized jargon, names, and titles
+
+## ABSOLUTE PRESERVATION RULES — NEVER VIOLATE:
+- Keep every [Name] / </span> / {{{}}} / URL byte-for-byte
+- NEVER translate to another language
+- NEVER change the number or order of sentences
+- NEVER alter facts, data, or meaning
+- NEVER re-digitize canonical spoken forms (ক-৩.১৪, এক হাজার টাকা,
+  দুই হাজার ছাব্বিশ — the deterministic layer already chose these)
+- Output ONLY the corrected Bangla text, no explanations, no annotations."""
     if instruction and instruction.strip():
         # User request outranks style defaults but NEVER bypasses the
         # preservation gates ([Name] tags, no re-language, no renumbering).
@@ -205,6 +230,7 @@ def _call_gemini(prompt: str, api_key: str, timeout: float = 90.0,
         "generationConfig": {
             "temperature": 0.0,
             "maxOutputTokens": 8192,
+            "thinkingConfig": {"thinkingBudget": -1},
         },
     }
     req = urllib.request.Request(
@@ -240,11 +266,13 @@ def _call_gemini(prompt: str, api_key: str, timeout: float = 90.0,
         _live(error="no candidates from API", step="Failed")
         raise RuntimeError(f"Gemini returned no candidates: {str(data)[:200]}")
     parts = candidates[0].get("content", {}).get("parts") or []
-    if not parts or not parts[0].get("text"):
+    # gemini-2.5-flash thinking returns a 'thought=true' part — skip it, take the actual text
+    answer_parts = [p for p in parts if p.get("text") and not p.get("thought")]
+    if not answer_parts or not answer_parts[0].get("text"):
         _live(error="empty reply from API", step="Failed")
         raise RuntimeError("Gemini returned empty text")
     _live(latency=round(time.time() - t0, 1), step="Gemini replied")
-    return parts[0]["text"]
+    return answer_parts[0]["text"]
 
 
 def gemini_normalize(raw_text: str, api_key: str, model: str = MODEL,
