@@ -9,9 +9,27 @@ model audio is generated. Run:
     echo "বাংলা লেখা" | venv/bin/python simulate_bangla_tts.py
 """
 import sys
+import os
 
 sys.path.insert(0, 'src')
 from audiobook import processing as P
+
+
+def _load_gemini_key():
+    """Resolve a Gemini key: environment first, then .env (gitignored)."""
+    k = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or ""
+    if k:
+        return k
+    try:
+        env_p = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+        if os.path.isfile(env_p):
+            for _line in open(env_p, encoding="utf-8", errors="ignore"):
+                _l = _line.strip()
+                if _l.startswith("GEMINI_API_KEY="):
+                    return _l.split("=", 1)[1].strip().strip('"').strip("'")
+    except Exception:
+        pass
+    return ""
 
 
 def token_estimate(txt):
@@ -52,7 +70,7 @@ def main():
     else:
         print('   (no changes needed — already pure Bangla words)')
 
-    print('\n🧠 [AI GEMINI — project Master-Prompt v5]   (simulated)')
+    print('\n🧠 [AI GEMINI — project Master-Prompt v5]   (live when key present)')
     print('   Gemini now receives BOTH inputs side-by-side:')
     print('   ┌─ YOUR ORIGINAL TEXT (pre-deterministic, with digits/৳/%)')
     print('   └─ LOCAL ENGINE OUTPUT (canonical base, already spoken Bangla)')
@@ -61,11 +79,31 @@ def main():
     print('   ├─ Gemini uses LOCAL output as the canonical base, fixes edge cases')
     print('   ├─ only the FIRST chunk carries the full original; later chunks')
     print('   │  continue from the same context')
-    print('   ├─ simulation mode: Gemini call skipped (no API key)')
+    key = _load_gemini_key()
+    if key:
+        from audiobook.gemini_normalizer import _call_gemini, api_key_ok
+        if api_key_ok(key):
+            print(f'   📡 LIVE CALL with key {key[:6]}… (dual-input, instruction="dramatic narrator tone")')
+            gemini_out = _call_gemini(
+                normalized, key, timeout=90,
+                instruction="dramatic narrator tone, keep character tags, never translate",
+                original=text,
+            ).strip()
+            same = gemini_out == normalized
+            print(f'   {'✅' if same else '⚠️'} SAME as local: {same}')
+        else:
+            print('   ❌ key invalid — skipped, local output used')
+            gemini_out = normalized
+    else:
+        print('   ├─ no key (set GEMINI_API_KEY or .env) — local output used')
+        gemini_out = normalized
     print('   └─ output feeds the chunker below')
+    print()
+    print('✅ [GEMINI OUTPUT — what the TTS will receive]')
+    print('   ', gemini_out.replace('\n', '↵\n    '))
 
     print('\n📚 [CHATTERBOX CHUNKER]  bangla_chunk_text(max_tokens=850)')
-    chunks = P.bangla_chunk_text(normalized, max_tokens=850)
+    chunks = P.bangla_chunk_text(gemini_out, max_tokens=850)
     total_pause = 0.0
     steps = []
     for i, ck in enumerate(chunks, 1):
@@ -75,12 +113,16 @@ def main():
         cue = ''
         if pause == 0.15:
             cue = 'soft breath \\n'
+        elif pause == 0.25:
+            cue = 'comma ,'
         elif pause == 0.6:
             cue = 'sentence ।'
         elif pause == 1.0:
             cue = 'paragraph \\n\\n'
         elif pause == 1.2:
             cue = 'verse ॥'
+        elif pause > 0:
+            cue = f'break {pause:.2f}s'
         print(f'   Chunk {i:02d}  est {token_estimate(ctxt):>4} tok  '
               f'pause_before {pause:>4.2f}s  {cue}')
         print(f'        {ctxt[:110]}{"…" if len(ctxt) > 110 else ""}')
@@ -91,7 +133,7 @@ def main():
     print('   voice routing: [কথক] → narrator voice, [রাহিম] → his voice')
 
     print(f'\n🕑 [PAUSE TIMELINE you would HEAR]  (total {total_pause:.2f}s of')
-    print('   distributed: । .6s  ॥1.2s  \\n .15s  \\n\\n 1.0s)')
+    print('   distributed: । .6s  ॥1.2s  \\n .15s  \\n\\n 1.0s  comma , .25s)')
     for i, (ctxt, pause) in enumerate(steps, 1):
         chars = min(72, len(ctxt))
         p = int(pause * 20)

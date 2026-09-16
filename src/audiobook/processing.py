@@ -980,6 +980,7 @@ _BN_ATTACH_RE = re.compile('|'.join(re.escape(s) for s in _BN_ATTACH))
 BANGLA_PAUSE_SECONDS = {
     '।': 0.6, '?': 0.6, '!': 0.6,
     '॥': 1.2,
+    ',': 0.25, ';': 0.25,
     '\n\n': 1.0,
     '\n': 0.15,
 }
@@ -1524,57 +1525,32 @@ def bangla_chunk_text(text, tokenizer=None, max_tokens=500, max_clusters=2400):
     """Bangla-aware segmentation returning [{text, pause_before}].
 
     - Never cuts inside a grapheme cluster (hasanta conjunct / vowel matra).
-    - Chunk budget is T3 *text tokens* (not English "words") when a tokenizer
-      is passed, else grapheme clusters — so the 1000-token AR cap is respected.
-    - Boundary cues follow BANGLA_PAUSE_SECONDS (dari 0.6s, ॥ 1.2s, blank line
-      1.0s, soft newline 0.15s). Punctuation is kept on the chunk so the model
-      gets the intonation cue; the pause is emitted BEFORE the next chunk.
+    - EVERY dari । / question ? / bang ! / double-dari ॥ / comma , becomes its
+      own chunk with pause_before = the pause that FOLLOWS the previous text
+      (BANGLA_PAUSE_SECONDS). The TTS loop turns pause_before into real silence,
+      so multi-sentence paragraphs now AUDIBLY pause at each । and "," — the
+      old version merged all sentences into one chunk and lost internal pauses.
+    - A single over-long sentence (beyond max_tokens) is split at word/cluster
+      boundaries so the T3 token cap is respected.
+    - Pause hierarchy: blank line = 1.0s, ॥ = 1.2s, ।?! = 0.6s, comma = 0.25s,
+      soft newline = 0.15s. Punctuation is kept ON the chunk so the model gets
+      the intonation cue; the silence is inserted before the next chunk.
     """
     text = unicode_repair_bangla(text)
     if not text:
         return []
     text = re.sub(r'\n{2,}', '\n\n', text)
 
-    cues = []  # (text_or_None, cue)
-    for piece in re.split(r'(\n\n+)', text):
-        if not piece:
-            continue
-        if '\n\n' in piece:
-            cues.append((None, '\n\n'))
-            continue
-        for line in re.split(r'(\n)', piece):
-            if not line:
-                continue
-            if line == '\n':
-                cues.append((None, '\n'))
-                continue
-            for sent in re.split(r'(?<=[।॥?!])\s*', line):
-                if not sent.strip():
-                    continue
-                cue = '।' if sent.rstrip().endswith(('।', '?', '!', '॥')) else None
-                cues.append((sent.strip(), cue))
+    result = []
+    pending = 0.0
 
-    chunks = []
-    buf = ''
-    buf_tok = 0
-    for raw_sent, cue in cues:
-        if raw_sent is None:
-            if buf:
-                chunks.append({'text': buf, 'pause_before': bangla_pause_duration(cue) if cue else 0.0})
-                buf = ''
-                buf_tok = 0
-            elif chunks:
-                chunks[-1]['pause_before'] += bangla_pause_duration(cue)
-            elif cue:
-                chunks.append({'text': '', 'pause_before': bangla_pause_duration(cue)})
-            continue
-        n_tok = _bn_count_tokens(raw_sent, tokenizer)
-        if buf and buf_tok + n_tok > max_tokens:
-            chunks.append({'text': buf, 'pause_before': 0.0})
-            buf = ''
-            buf_tok = 0
-        if n_tok > max_tokens:
-            cls = list(_clusters(raw_sent))
+    def _emit(sent):
+        nonlocal pending
+        if not sent or not sent.strip():
+            return
+        sent = sent.strip()
+        if _bn_count_tokens(sent, tokenizer) > max_tokens:
+            cls = list(_clusters(sent))
             step = max(80, int(max_tokens * 1.2))
             start = 0
             while start < len(cls):
@@ -1587,28 +1563,38 @@ def bangla_chunk_text(text, tokenizer=None, max_tokens=500, max_clusters=2400):
                             break
                 sub = ''.join(cls[start:cut]).strip()
                 if sub:
-                    if start:
-                        chunks.append({'text': '', 'pause_before': 0.0})
-                    chunks.append({'text': sub, 'pause_before': 0.0})
+                    result.append({'text': sub, 'pause_before': pending})
+                    pending = 0.0
                 start = cut
+            return
+        result.append({'text': sent, 'pause_before': pending})
+        pending = 0.0
+        tail = sent[-1]
+        if tail in BANGLA_PAUSE_SECONDS:
+            pending += BANGLA_PAUSE_SECONDS[tail]
+
+    # Paragraphs break at blank lines (1.0s); ""/"\n" act as markers.
+    for para in re.split(r'(\n\n+)', text):
+        if not para:
             continue
-        buf += ((' ' if buf else '') + raw_sent)
-        buf_tok += n_tok
-        if len(list(_clusters(buf))) >= max_clusters and buf_tok >= max_tokens:
-            chunks.append({'text': buf, 'pause_before': 0.0})
-            buf = ''
-            buf_tok = 0
+        if '\n\n' in para:
+            pending += bangla_pause_duration('\n\n')
+            continue
+        for line in re.split(r'(\n)', para):
+            if not line:
+                continue
+            if line == '\n':
+                pending += bangla_pause_duration('\n')
+                continue
+            for sent in re.split(r'(?<=[।॥?!,])\s*', line):
+                _emit(sent)
 
-    if buf:
-        chunks.append({'text': buf, 'pause_before': 0.0})
-
-    if not chunks:
-        return []
-
-    resolved = [c for c in chunks if c['text']]
-    for i in range(len(resolved)):
+    resolved = [c for c in result if c['text']]
+    # Safety net for any chunk still missing a pause_before: inherit the pause
+    # of the punctuation that closes the PREVIOUS chunk.
+    for i in range(1, len(resolved)):
         if not resolved[i]['pause_before']:
-            m = re.search(r'([।॥?!])$', resolved[i]['text'].strip())
-            if m and i > 0:
+            m = re.search(r'([।॥?!,;])\s*$', resolved[i - 1]['text'].strip())
+            if m:
                 resolved[i]['pause_before'] = BANGLA_PAUSE_SECONDS[m.group(1)]
     return resolved 
