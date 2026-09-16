@@ -1130,6 +1130,15 @@ def _bn_num_words(n):
 _BN_MONTHS = ['', 'জানুয়ারি', 'ফেব্রুয়ারি', 'মার্চ', 'এপ্রিল', 'মে', 'জুন',
               'জুলাই', 'আগস্ট', 'সেপ্টেম্বর', 'অক্টোবর', 'নভেম্বর', 'ডিসেম্বর']
 
+# Locative (অধিকরণ কারক) of month names: consonant-final months take -এ
+# (সেপ্টেম্বরে), ি-final months take -তে (জানুয়ারিতে), মে always goes মাসে.
+_BN_MONTH_LOCATIVE = {
+    'জানুয়ারি': 'জানুয়ারিতে', 'ফেব্রুয়ারি': 'ফেব্রুয়ারিতে', 'মার্চ': 'মার্চে',
+    'এপ্রিল': 'এপ্রিলে', 'মে': 'মে মাসে', 'জুন': 'জুনে', 'জুলাই': 'জুলাইতে',
+    'আগস্ট': 'আগস্টে', 'সেপ্টেম্বর': 'সেপ্টেম্বরে', 'অক্টোবর': 'অক্টোবরে',
+    'নভেম্বর': 'নভেম্বরে', 'ডিসেম্বর': 'ডিসেম্বরে',
+}
+
 _BN_CURRENCY_NAMES = {
     '৳': 'টাকা', 'Tk': 'টাকা', 'TK': 'টাকা', 'BDT': 'টাকা',
     '₹': 'রুপি', '$': 'ডলার', '€': 'ইউরো', '£': 'পাউন্ড', '¥': 'ইয়েন',
@@ -1251,15 +1260,20 @@ def _bn_time_words(hour, minute, has_am_pm, am_pm):
     if not has_am_pm:
         return phrase
     if am_pm and am_pm.lower() in ('am', 'pm'):
-        if h < 6:
+        hp = h
+        if am_pm.lower() == 'pm' and h < 12:
+            hp = h + 12
+        elif am_pm.lower() == 'am' and h == 12:
+            hp = 0
+        if hp < 6:
             daypart = 'ভোরে'
-        elif h < 12:
+        elif hp < 12:
             daypart = 'সকালে'
-        elif h < 15:
+        elif hp < 15:
             daypart = 'দুপুরে'
-        elif h < 18:
+        elif hp < 18:
             daypart = 'বিকালে'
-        elif h < 20:
+        elif hp < 20:
             daypart = 'সন্ধ্যায়'
         else:
             daypart = 'রাতে'
@@ -1277,9 +1291,12 @@ def bangla_normalize_text(text):
     (সাড়ে/সোয়া/পৌনে/দেড় + 24h folding), dates (dd/mm/yyyy incl. Bangla
     digits), ordinals (৪র্থ/২য়/৩রা/৫ই), context years (২০২৬ সালে), units
     (km/kg/L/°C...), decimals (৩.১৪ -> তিন দশমিক এক চার), lakh/crore integer
-    grouping, leading-zero phones read digit-by-digit, negatives, and a small
-    trusted acronym dictionary. Forms match the Master-Prompt ruleset exactly
-    (ষোল/আটাশ/তিপ্পান্ন canonical). Never raises.
+    grouping, leading-zero phones read digit-by-digit, negatives, locative
+    case (টা-এ -> টায় via া-final -য়; consonant months + -এ e.g. সেপ্টেম্বরে,
+    ি-final months + -তে e.g. জানুয়ারিতে), Bangla-calendar years (বঙ্গাব্দ),
+    alternate spelling খ্রিষ্টাব্দ, a small trusted acronym dictionary. Forms
+    match the Master-Prompt ruleset exactly (ষোল/আটাশ/তিপ্পান্ন canonical).
+    Never raises.
     """
     if not text or not is_bangla_text(text):
         return text
@@ -1375,7 +1392,8 @@ def bangla_normalize_text(text):
         return _bn_year_words(yr) + m.group('ctx')
 
     text = re.sub(
-        r'(?P<n>[0-9০-৯]+)(?P<ctx>\s*(?:সাল|সালে|সন|সনে|খ্রিস্টাব্দ|খ্রিস্টাব্দে))',
+        r'(?P<n>[0-9০-৯]+)(?P<ctx>\s*(?:সাল|সালে|সন|সনে|খ্রিস্টাব্দ|খ্রিস্টাব্দে|'
+        r'খ্রিষ্টাব্দ|খ্রিষ্টাব্দে|বঙ্গাব্দ|বঙ্গাব্দে))',
         lambda m: _bn_year_words(int(_bn_to_ascii_digits(m.group('n')))) + m.group('ctx'),
         text,
     )
@@ -1393,6 +1411,17 @@ def bangla_normalize_text(text):
         r'(?<![A-Za-z])-?(?:[0-9০-৯]+(?:,[0-9০-৯]{1,3})*(?:\.[0-9০-৯]+)?)(?![A-Za-z])',
         lambda m: _bn_read_amount(m.group(0)), text,
     )
+
+    # Locative (অধিকরণ কারক): ৭টা-এ -> সাতটায় (া-final -> -য়). Clock phrases
+    # all end in টা (সাতটা, সাড়ে Xটা, দেড়টা) so টো-ও is NOT merged — এটাও/
+    # ওটাও and দুটো ও ("two and") must stay untouched. Month names take -এ
+    # (সেপ্টেম্বরে) or -তে (জানুয়ারিতে).
+    def _loc_bnd():
+        return r'(?=\s|$|[।,!?;:])'
+    text = re.sub(r'(?<=টা)(?:\s*-\s*|\s+)এ' + _loc_bnd(), 'য়', text)
+    for mon, loc in _BN_MONTH_LOCATIVE.items():
+        text = re.sub(re.escape(mon) + r'\s*-\s*এ' + _loc_bnd(), loc, text)
+        text = re.sub(re.escape(mon) + r'\s+এ' + _loc_bnd(), loc, text)
 
     return text
 
