@@ -1842,16 +1842,17 @@ def create_audiobook(
                 except Exception as e:
                     print(f"⚠️ Volume normalization failed for chunk {i+1}: {str(e)}")
             
-            # Add pause if this chunk had line breaks
+            # Insert silence BEFORE this chunk's speech using its pause_before.
+            # The old code appended silence AFTER the chunk — this is wrong for
+            # line breaks/dari because the pause belongs between THIS chunk and
+            # the PREVIOUS one. pause_before semantics: silence BEFORE speech.
             chunk_pause_duration = chunks_with_pauses[i]['pause_duration']
             if chunk_pause_duration > 0:
                 sample_rate = getattr(model, "sr", 24000) if model else 24000
                 pause_audio = create_silence_audio(chunk_pause_duration, sample_rate)
-                audio_with_pause = np.concatenate([audio_np, pause_audio])
-                audio_chunks.append(audio_with_pause)
-                print(f"🔇 Chunk {i+1}: Added {chunk_pause_duration:.1f}s pause after speech")
-            else:
-                audio_chunks.append(audio_np)
+                audio_chunks.append(pause_audio)
+                print(f"🔇 Chunk {i+1}: Added {chunk_pause_duration:.1f}s pause BEFORE speech (line/dari cue)")
+            audio_chunks.append(audio_np)
             # Save this chunk immediately
             fname = os.path.join(project_dir, chunk_filenames[i])
             with wave.open(fname, 'wb') as wav_file:
@@ -2914,16 +2915,14 @@ def create_multi_voice_audiobook_with_assignments(
                 except Exception as e:
                     print(f"⚠️ Volume normalization failed for chunk {i+1}: {str(e)}")
             
-            # Add pause if this chunk had line breaks
+            # Insert pause BEFORE this chunk's speech (pause_before semantics).
             chunk_pause_duration = mapped_segments_with_pauses[i]['pause_duration']
             if chunk_pause_duration > 0:
                 sample_rate = getattr(processing_model, "sr", 24000) if processing_model else 24000
                 pause_audio = create_silence_audio(chunk_pause_duration, sample_rate)
-                audio_with_pause = np.concatenate([audio_np, pause_audio])
-                audio_chunks.append(audio_with_pause)
-                print(f"🔇 Chunk {i+1} ({voice_name}): Added {chunk_pause_duration:.1f}s pause after speech")
-            else:
-                audio_chunks.append(audio_np)
+                audio_chunks.append(pause_audio)
+                print(f"🔇 Chunk {i+1} ({voice_name}): Added {chunk_pause_duration:.1f}s pause BEFORE speech (line/dari cue)")
+            audio_chunks.append(audio_np)
             # Save this chunk immediately
             fname = os.path.join(project_dir, chunk_filenames[i])
             with wave.open(fname, 'wb') as wav_file:
@@ -5723,19 +5722,18 @@ def create_audiobook_with_original_voice_metadata(
             else:
                 audio_np = audio_data
             
-            # Add pause if this chunk had line breaks
+            # Insert silence BEFORE this chunk's speech (pause_before semantics).
             chunk_pause_duration = chunks_with_pauses[chunk_num-1]['pause_duration']  # chunk_num is 1-based
             if chunk_pause_duration > 0:
                 sample_rate = getattr(model, "sr", 24000) if model else 24000
                 pause_audio = create_silence_audio(chunk_pause_duration, sample_rate)
-                audio_with_pause = np.concatenate([audio_np, pause_audio])
-                # Convert back to tensor if original was tensor
                 if hasattr(audio_data, 'cpu'):
                     import torch
-                    audio_data = torch.tensor(audio_with_pause).unsqueeze(0)
+                    pause_tensor = torch.tensor(pause_audio).unsqueeze(0)
+                    audio_data = torch.cat([pause_tensor, audio_data], dim=-1)
                 else:
-                    audio_data = audio_with_pause
-                print(f"🔇 Chunk {chunk_num}: Added {chunk_pause_duration:.1f}s pause after speech")
+                    audio_data = np.concatenate([pause_audio, audio_data])
+                print(f"🔇 Chunk {chunk_num}: Added {chunk_pause_duration:.1f}s pause BEFORE speech (line/dari cue)")
             
             audio_chunks.append(audio_data)
             
