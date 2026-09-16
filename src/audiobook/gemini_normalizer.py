@@ -154,8 +154,24 @@ def _chunk_text(text: str, max_chars: int = MAX_INPUT_CHARS):
 
 def _call_gemini(prompt: str, api_key: str, timeout: float = 90.0,
                  instruction: str = None, original: str = None,
-                 original_shown: bool = False) -> str:
+                 original_shown: bool = False, grammar_fix: bool = False) -> str:
     system = get_system_prompt()
+    if grammar_fix:
+        # The user wants REAL Bangla correction: Gemini analyzes the text with
+        # its full Bangla knowledge and fixes grammar/vocabulary/flow, scoped so
+        # meaning, order, count, [Name] tags, and canonical number forms survive.
+        system += """
+\n\nGRAMMAR-FIX MANDATE — the user wants you to REALLY ANALYZE the Bangla and fix it:
+- Correct grammatical errors: case/vibhakti (কারক), tense (কাল), subject-verb
+  agreement (পুরুষ-বচন), postpositions (কর্ম-প্রবচনীয়), particles (রা-কে-এ),
+  spelling variants, and non-native/transliterated constructions.
+- Improve awkward phrasing ONLY where it makes the Bangla more correct/natural.
+- KEEP: the meaning, every fact, the number and order of sentences, every
+  [Name]/tag/url byte-for-byte, and the canonical spoken-number forms the local
+  layer already produced (ক-৩.১৪, শূন্য, এক হাজার টাকা — never re-digitize, never
+  re-choose a different numeral word unless it is a GRAMMAR-mandated change).
+- NEVER translate to another language, never add/remove content, never rename.
+- Output final corrected Bangla only, same sentence count, same order."""
     if instruction and instruction.strip():
         # User request outranks style defaults but NEVER bypasses the
         # preservation gates ([Name] tags, no re-language, no renumbering).
@@ -233,18 +249,20 @@ def _call_gemini(prompt: str, api_key: str, timeout: float = 90.0,
 
 def gemini_normalize(raw_text: str, api_key: str, model: str = MODEL,
                      timeout: float = 90.0, instruction: str = None,
-                     original: str = None) -> str:
+                     original: str = None, grammar_fix: bool = False) -> str:
     """Send raw Bangla text to Gemini with the active ruleset; return spoken text.
 
     instruction: optional free-form "what the user wants" (tone/style/do-don't)
     appended to the ruleset as highest-priority guidance.
+    grammar_fix: when True, Gemini fully analyzes the Bangla and CORRECTS
+    grammar (case/tense/agreement/spelling/flow) while keeping meaning, order,
+    sentence count, [Name] tags, and canonical number forms.
     original: optional raw text the user typed (pre-deterministic). When given,
     Gemini sees BOTH the original input and the local engine's already-
     normalized output, and uses the local output as the canonical base. Sent
     once with the first chunk; later chunks note the same original.
     Long input is chunked at sentence boundaries and each chunk normalized, so
-    whole audiobooks work. Preserves [Name] tags/URLs so multi-voice routing
-    still works downstream. Raises RuntimeError on any failure — the caller
+    whole audiobooks work. Raises RuntimeError on any failure — the caller
     decides the fallback.
     """
     if not api_key_ok(api_key):
@@ -267,7 +285,8 @@ def gemini_normalize(raw_text: str, api_key: str, model: str = MODEL,
         if total <= 1:
             _live(step=f"Sending {len(raw_text)} chars to {model}…", detail="single chunk")
             result = _call_gemini(raw_text, api_key, timeout=timeout,
-                                  instruction=instruction, original=original).strip()
+                                  instruction=instruction, original=original,
+                                  grammar_fix=grammar_fix).strip()
             if not result:
                 raise RuntimeError("Gemini returned empty text")
             print(f"[GEMINI] ✅ {len(raw_text)} → {len(result)} chars in {GEMINI_LIVE['latency']}s", flush=True)
@@ -279,7 +298,7 @@ def gemini_normalize(raw_text: str, api_key: str, model: str = MODEL,
             t_c = time.time()
             result = _call_gemini(chunk, api_key, timeout=timeout,
                                   instruction=instruction, original=original,
-                                  original_shown=(i > 1)).strip()
+                                  original_shown=(i > 1), grammar_fix=grammar_fix).strip()
             if not result:
                 raise RuntimeError(f"Gemini returned empty text for chunk {i}/{total}")
             lat = GEMINI_LIVE["latency"]
