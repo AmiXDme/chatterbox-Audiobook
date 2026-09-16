@@ -52,11 +52,16 @@ def main():
     else:
         print('   (no changes needed — already pure Bangla words)')
 
-    print('\n🧠 [AI GEMINI — project Master-Prompt]   (live, optional)')
-    print('   receives ONLY the letter text above; rewrites into natural, ')
-    print('   story-toned narration, keeps [Name] tags, never re-numbers.')
-    print('   ├─ simulation mode: Gemini call skipped (offline)')
-    print('   ├─ live mode: runs on the engine output + shows live panel')
+    print('\n🧠 [AI GEMINI — project Master-Prompt v5]   (simulated)')
+    print('   Gemini now receives BOTH inputs side-by-side:')
+    print('   ┌─ YOUR ORIGINAL TEXT (pre-deterministic, with digits/৳/%)')
+    print('   └─ LOCAL ENGINE OUTPUT (canonical base, already spoken Bangla)')
+    print('   + your "What should Gemini do?" instruction (if any)')
+    print('   + Master-Prompt v5 ruleset (APPENDIX L: USER REQUEST contract)')
+    print('   ├─ Gemini uses LOCAL output as the canonical base, fixes edge cases')
+    print('   ├─ only the FIRST chunk carries the full original; later chunks')
+    print('   │  continue from the same context')
+    print('   ├─ simulation mode: Gemini call skipped (no API key)')
     print('   └─ output feeds the chunker below')
 
     print('\n📚 [CHATTERBOX CHUNKER]  bangla_chunk_text(max_tokens=850)')

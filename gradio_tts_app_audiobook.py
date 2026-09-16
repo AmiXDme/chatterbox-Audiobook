@@ -32,6 +32,24 @@ from io import StringIO
 os.environ['TQDM_DISABLE'] = '0'
 os.environ['TQDM_NCOLS'] = '80'
 
+# Lightweight .env loader (no dotenv dependency): GEMINI_API_KEY etc.
+# Keep secrets out of the repository — .env is gitignored.
+try:
+    _env_p = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if os.path.isfile(_env_p):
+        from pathlib import Path as _Path
+        for _line in _Path(_env_p).read_text(encoding="utf-8", errors="ignore").splitlines():
+            _line = _line.strip()
+            if not _line or _line.startswith("#") or "=" not in _line:
+                continue
+            _k, _v = _line.split("=", 1)
+            _k = _k.strip()
+            _v = _v.strip().strip('"').strip("'")
+            if _k and not os.environ.get(_k):
+                os.environ[_k] = _v
+except Exception:
+    pass
+
 # Monkey patch tqdm to ensure single line updates
 try:
     import tqdm
