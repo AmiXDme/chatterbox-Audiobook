@@ -170,10 +170,15 @@ Longer reference files don't crash — but extra audio is ignored (TTS/VC-target
 
 ---
 
-## 📖 Original Feature Guide (unchanged)
+## 📖 Original Feature Guide
 
 ### 🎭 Custom Audiobook Processing Pipeline
-**Return Pause System** — every line break (`\n`) adds a 0.1 s pause automatically (accumulative, works single/multi/batch):
+**Dual-engine pause system.** English/other: every line break (`\n`) adds **0.1 s** (accumulative, single/multi/batch). Bangla `বাংলা` uses Bengali-grammar boundary cues:
+```
+। ? !  → 0.6 s      ॥ → 1.2 s      \n → 0.15 s (breath)      \n\n → 1.0 s (paragraph)
+```
+Runs of 2+ returns collapse to one paragraph pause (never stacked). Punctuation stays on the chunk for prosody, and Bangla numbers/dates/currency are pre-converted to words (`৳৩.১৪ → তিন টাকা চৌদ্দ পয়সা`, `১৩:৩০-এ → দেড়টায়`). Full reference: [`PAUSE_FEATURE_DOCUMENTATION.md`](PAUSE_FEATURE_DOCUMENTATION.md).
+
 ```
 [Narrator] The sun was setting over the hills.
 
@@ -185,7 +190,7 @@ Let's hurry before it gets dark."
 
 [Narrator] They rushed toward the cave, hearts pounding.
 ```
-**Formatting tips:** `[Name]` tags per speaker · double returns for scene changes · extra returns before reveals · single returns between speakers. Multi-voice: always use identical `[Name]` spelling.
+**Formatting tips:** `[Name]` tags per speaker · blank lines for scene changes (Bangla: 1.0 s) · single returns between speakers (Bangla: 0.15 s breath) · end Bangla sentences with `।` for a 0.6 s thought pause · `॥` for verse/scene coda (1.2 s). Multi-voice: always use identical `[Name]` spelling.
 
 ### 🎚️ Volume Setup
 Voice Library tab → upload sample → set target (−18 dB default) → save. Multi-voice: enable normalization once, all characters match. Presets: audiobook −18, podcast −16, broadcast −23 dB RMS.

@@ -2,199 +2,199 @@
 
 ## Overview
 
-The Chatterbox TTS Audiobook Edition now includes automatic pause insertion based on line breaks (returns) in your text input. For every line break (`\n` or `\r\n`) detected in your text, the system will automatically add a 0.1-second pause to the generated audio.
+Chatterbox TTS Audiobook Edition ships with a **dual-engine pause system**:
+one for English/other-languages, and a fully **Bengali-grammar-aware pause engine**
+for Bangla `বাংলা` text. Pauses are inserted automatically — you never place a
+silence tag by hand; the system reads **boundary cues** (line breaks, sentence
+enders, paragraph dandas) and writes the silence itself.
+
+| Engine | Trigger | Pause |
+|---|---|---|
+| English + others | every line break `\n` / `\r\n` | **0.1 s per return**, accumulates (10 returns = 1 s) |
+| **Bangla** | `।` `?` `!` sentence ender | **0.6 s** |
+| **Bangla** | `॥` (double danda / stanza end) | **1.2 s** |
+| **Bangla** | single return `\n` (soft breath / line wrap) | **0.15 s** |
+| **Bangla** | blank line `\n\n` (paragraph break) | **1.0 s** |
+| **Bangla** | runs of 2+ returns | collapsed to one `\n\n` → always 1.0 s (never stacked) |
+
+## Why Bangla is different (Bengali grammar)
+
+Bengali prose marks sentence ends with the danda `।`, stanza/verse ends with
+`॥`, and paragraphs with blank lines. A flat "0.1 s per line break" rule
+sounds robotic for Bangla because line wraps inside a paragraph are **breaths**,
+not full stops. The Bangla engine therefore treats formatting **grammatically**:
+
+- `।` is a sentence boundary — a full **0.6 s thought pause**.
+- `॥` closes a verse/stanza — the longest break, **1.2 s**.
+- a single `\n` is usually a poet's line-wrap or a forced soft break — just a
+  **0.15 s breath**.
+- a blank line `\n\n` is a paragraph — **1.0 s**. Any run of 2+ returns is
+  normalized to exactly one paragraph pause, so you never get accidental
+  5-second dead air.
+
+Punctuation is **kept** on the chunk text when it reaches the model, so the
+synthesizer also sees the intonation cue — the pause and the prosody work
+together, but independently.
 
 ## How It Works
 
-### Return-Based Pause System
+### English / other languages (single, multi, batch)
 
-- **Detection**: The system counts all line breaks in your input text
-- **Duration**: Each line break adds exactly 0.1 seconds of silence
-- **Accumulation**: Multiple line breaks accumulate (10 returns = 1 second pause)
-- **Debug Output**: Terminal shows pause information when audio is generated
+1. The text processor counts every return: `process_text_for_pauses(text, 0.1)`.
+2. Audio is combined with `create_silence_audio(total_pause, sample_rate)`.
+3. Terminal shows the tally:
 
-### Example
-
-**Input Text:**
 ```
-Hello, this is the first line.
-This is the second line.
-
-This line comes after an empty line.
-Final line.
+🔇 Detected 4 line breaks → 0.4s total pause time
+🔇 Adding 0.4s pause (4 returns × 0.1s each)
 ```
 
-**Result:** 
-- 4 line breaks detected
-- 0.4 seconds of total pause time added
-- Debug output: `🔇 Detected 4 line breaks → 0.4s total pause time`
+### Bangla `বাংলা` (quick TTS, single audiobook, multi-voice, metadata samples)
+
+1. **Repair + normalize** — `unicode_repair_bangla()` fixes broken grapheme
+   clusters (যুক্তাক্ষর), then `bangla_normalize_text()` rewrites every
+   digit shape to Bengali words *before* any language model sees them:
+   `৳৩.১৪ → তিন টাকা চৌদ্দ পয়সা`, `১৩:৩০-এ → দেড়টায়`,
+   `১৪৩৩ বঙ্গাব্দ → চৌদ্দশো তেত্রিশ বঙ্গাব্দ`.
+2. **Cue extraction** — `bangla_chunk_text()` (max_tokens=500 quick / 850
+   audiobook) walks paragraphs → lines → sentences and tags each boundary with
+   its cue and converts the cue with `bangla_pause_duration(cue)`.
+3. **Pause assignment** — each chunk carries `pause_before`; a cue with an
+   empty buffer *adds onto the previous chunk* (stacking blank lines into one
+   longer space), and a chunk ending in `।/॥` gets the fallback tail pause.
+4. **Silence synthesis** — `create_silence_audio(pause, sr)` is emitted at each
+   boundary. Terminal shows the boundary trace:
+
+```
+🔇 Adding 0.60s pause (boundary cue)
+🔇 Total pause time distributed: 1.75s
+```
+
+Single/multi audiobook store the same pauses as per-chunk `pause_duration` and
+print per-chunk lines like:
+
+```
+🔇 Chunk 5: Added 0.6s pause after speech
+🔇 Chunk 5 (কথক): Added 1.0s pause after speech
+```
+
+Multi-voice Bangla keeps every character's pauses **inside that voice's own
+audio**: `🔇 Line breaks detected in [কথক]: +0.15s pause (from 1 returns)`.
+
+## Example
+
+**Bengali input (`বাংলা`):**
+```
+বৃষ্টি পড়ল সারা রাত। সকালে সবুজ পাতা ঝলমল করছিল।?
+
+পরের গ্রামে গিয়ে দেখি সেখানে মেলা বসেছে।
+একটা দোকানে পিঠা বিক্রি হচ্ছে।॥
+```
+
+**Parsed cues → pauses:**
+
+| Unit | Cue → Pause |
+|---|---|
+| `বৃষ্টি পড়ল সারা রাত।` | sentence end `।` → 0.6 s |
+| `সকালে সবুজ পাতা ঝলমল করছিল।?` | `।?` → 0.6 s |
+| blank line | paragraph `\n\n` → 1.0 s |
+| `পরের গ্রামে গিয়ে দেখি সেখানে মেলা বসেছে।` | `।` → 0.6 s |
+| `একটা দোকানে পিঠা বিক্রি হচ্ছে।॥` | verse end `॥` → 1.2 s |
+
+**English input:** 4 line breaks → 0.4 s total (accumulative).
 
 ## Features Supported
 
-### ✅ Speech-to-Text Generation
-- Single text input with returns
-- Pauses added to the end of generated speech
-- Debug output in terminal
+### ✅ Quick Speech-to-Text (TTS tab)
+- English: trailing pauses per return group.
+- Bangla: full cue-aware breaks (`। 0.6 s`, `॥ 1.2 s`, `\n 0.15 s`, `\n\n 1.0 s`).
 
-### ✅ Single-Voice Audiobook Creation
-- Text processing before chunking
-- Pauses distributed throughout the audiobook
-- Project metadata includes pause information
+### ✅ Single-Voice Audiobook
+- Bangla text normalized (grammar + numbers) before chunking; `pause_duration`
+  stored per chunk and stitched after each chunk's WAV.
 
-### ✅ Multi-Voice Audiobook Creation
-- Character dialogue with natural pauses
-- Pause processing applied before voice assignment
-- Debug output shows total pause time added
+### ✅ Multi-Voice Audiobook
+- `[Character]` / `[Name]` tags split first; each voice's block is chunked and
+  paused independently, so the pause belongs to that speaker.
 
-### ✅ Batch Audiobook Processing
-- Automatic pause processing for all files in batch
-- Individual pause calculations per file
+### ✅ Batch & Regeneration
+- Same pause engine runs per file and per regenerated chunk.
 
 ## Technical Implementation
 
-### Text Processing Pipeline
+### Functions (Bangla engine — `src/audiobook/processing.py`)
+- `BANGLA_PAUSE_SECONDS` — the cue→seconds table (the single place to tune).
+- `bangla_pause_duration(cue)` — lookup, unknown cue → 0.
+- `bangla_chunk_text(text, max_tokens, max_clusters)` — grammar-aware
+  paragraphs→lines→sentences chunker that returns `{text, pause_before}` plans
+  and keeps punctuation for prosody.
+- `bangla_normalize_text(text)` — stage-1 deterministic rewrite (plus
+  `unicode_repair_bangla()`); runs BEFORE Gemini so the model sees letters only.
+- `process_voice_content_with_line_breaks(...)` — multi-voice Bangla branch.
 
-1. **Input Text Analysis**
-   ```python
-   processed_text, return_count, total_pause_duration = process_text_for_pauses(text, 0.1)
-   ```
+### Functions (English engine)
+- `process_text_for_pauses(text, 0.1)` — counts returns.
+- `create_silence_audio(seconds, sample_rate)` — silence synthesis.
+- `insert_pauses_between_chunks(...)` / `process_text_with_distributed_pauses(...)`
+  — English audiobook combination.
 
-2. **Silence Generation**
-   ```python
-   pause_audio = create_silence_audio(total_pause_duration, sample_rate)
-   ```
+### Files
+- `src/audiobook/processing.py` — both engines + Bangla grammar rules.
+- `gradio_tts_app_audiobook.py` — quick `/single/multi/batch` integration.
+- `prompts/Bangla_Audiobook_Master_Language_Prompt_v4.txt` — Gemini rewrite rules.
 
-3. **Audio Combination**
-   ```python
-   final_audio = np.concatenate([speech_audio, pause_audio])
-   ```
-
-### Debug Output Examples
-
-**Speech-to-Text:**
-```
-🔇 Detected 3 line breaks → 0.3s total pause time
-🔇 Added 0.3s pause to speech (3 returns)
-```
-
-**Audiobook Creation:**
-```
-🔇 Detected 15 line breaks → 1.5s total pause time
-🔇 Adding 1.5s pause (15 returns × 0.1s each)
-```
+### Compatibility
+- ✅ Windows, macOS, Linux · ✅ CPU mode · ✅ All audio formats
+- ✅ Existing voice profiles and projects · ✅ Batch workflows
+- ✅ Mixed Bangla/English documents (each engine picks its own rules per text)
 
 ## Usage Guidelines
 
-### Best Practices
+### Best Practices (Bangla)
+1. End sentences with `।` (or `?`/`!`) — you get a natural 0.6 s thought break.
+2. Leave **one blank line** between paragraphs — a deliberate 1.0 s pause.
+3. Use a single `\n` only as a soft breath (e.g. poem lines).
+4. `॥` for verse or scene coda — the longest pause.
+5. Write numbers freely (digits or Bengali digits) — they become Bengali words
+   automatically; dates, times, currency, percentages and ordinals included.
+6. Multi-voice: `[Character]` tags first, identical spelling throughout.
 
-1. **Natural Breaks**: Use line breaks where you want natural pauses in speech
-2. **Paragraph Separation**: Double line breaks create longer pauses
-3. **Dialogue**: Separate character lines for better multi-voice audiobooks
-4. **Punctuation**: Combine with punctuation for maximum effect
-
-### Example Text Formatting
-
-**Good for Natural Speech:**
-```
-Welcome to our story.
-Let me tell you about a magical place.
-
-In this place, anything is possible.
-The adventure begins now.
-```
-
-**Good for Multi-Voice Audiobooks:**
-```
-[Narrator] The sun was setting over the hills.
-
-[Character1] "We need to find shelter soon."
-
-[Character2] "I see a cave up ahead.
-Let's hurry before it gets dark."
-
-[Narrator] They rushed toward the cave.
-```
+### Best Practices (English/other)
+- Line breaks are the pause control; double returns = longer pauses.
 
 ## Configuration
 
-### Pause Duration
-- **Current Setting**: 0.1 seconds per return
-- **Location**: Hardcoded in processing functions
-- **Customization**: Can be modified in `src/audiobook/processing.py`
-
-### Sample Rate
-- **Default**: 24,000 Hz
-- **Compatibility**: Automatically matches model output
-- **Quality**: High enough for natural-sounding pauses
-
-## Testing
-
-### Test Script
-Run the included test script to verify functionality:
-```bash
-python test_pause_functionality.py
-```
-
-### Manual Testing
-1. Create text with line breaks
-2. Generate speech or audiobook
-3. Check terminal for debug output
-4. Listen for pauses in generated audio
+- **English pause**: `0.1` s per return — hardcoded in `process_text_for_pauses`.
+- **Bangla pauses**: the `BANGLA_PAUSE_SECONDS` table in
+  `src/audiobook/processing.py` — adjust `।`,`॥`,`\n`,`\n\n` values in one spot.
+- **Sample rate**: 24,000 Hz default; auto-matches model output.
 
 ## Troubleshooting
 
-### Common Issues
+**No pauses heard:** confirm your text actually has the cues (`\n` / blank line /
+`।`). Bangla text with no sentence-enders and no returns has no boundaries —
+add `।`.
 
-**No Pauses Heard:**
-- Check if text actually contains line breaks (`\n`)
-- Verify debug output appears in terminal
-- Ensure audio player supports the full generated file
+**Bangla paragraphs gap too long/short:** tune `BANGLA_PAUSE_SECONDS['\n\n']`
+(1.0 s default).
 
-**Pauses Too Long/Short:**
-- Current setting is 0.1s per return (not configurable via UI)
-- Multiple consecutive returns will create longer pauses
-- This is intended behavior for paragraph breaks
+**English returns sound broken up:** for Bangla, single-line wraps are 0.15 s
+breaths by grammar design — use `।` for sentence pauses or a blank line for a
+paragraph.
 
-**Debug Output Missing:**
-- Check terminal/console where the application is running
-- Ensure you're using the updated functions
-- Verify pause processing is enabled
+**Multi-voice pauses in wrong voice:** each voice's block is chunked after tag
+splitting — keep dialogue inside `[Name]` blocks.
 
 ## Future Enhancements
-
-### Potential Improvements
-- User-configurable pause duration
-- Different pause types (comma, period, paragraph)
-- Visual indicators in the UI
-- Pause preview before generation
-- Advanced pause distribution algorithms
-
-### Integration Ideas
-- Export settings in voice profiles
-- Project-level pause configuration
-- Advanced text markup for pause control
-- Audio timeline with pause indicators
-
-## Technical Details
-
-### Files Modified
-- `src/audiobook/processing.py` - Core pause processing functions
-- `gradio_tts_app_audiobook.py` - Main TTS integration
-- `test_pause_functionality.py` - Test and verification script
-
-### Functions Added
-- `process_text_for_pauses()` - Text analysis and preprocessing
-- `create_silence_audio()` - Silence generation
-- `insert_pauses_between_chunks()` - Audio combination with pauses
-- `process_text_with_distributed_pauses()` - Advanced chunk processing
-
-### Compatibility
-- ✅ Windows, macOS, Linux
-- ✅ CPU processing mode
-- ✅ All supported audio formats
-- ✅ Existing voice profiles and projects
-- ✅ Batch processing workflows
+- User-configurable pause table in the UI.
+- Comma-level micro-pauses (`,` → short breath) — not yet applied.
+- Visual pause timeline in the UI.
+- Pause preview before generation (see the Preview → Verify → Generate loop in
+  the TTS tab).
+- Sentence context (prosody) carry-over per language.
 
 ---
 
-**Note**: This feature is automatically enabled and requires no configuration. Simply use line breaks in your text where you want pauses, and the system will handle the rest! 
+**Note**: The system is automatic — no configuration needed. Write naturally
+(Bangla: `।` + blank lines; English: line breaks) and the pause system handles
+the rhythm.
