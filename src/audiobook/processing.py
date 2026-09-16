@@ -1308,7 +1308,10 @@ def bangla_normalize_text(text):
     text = re.sub(r'([0-9০-৯]+)\s*%', lambda m: _bn_read_amount(m.group(1)) + ' শতাংশ', text)
 
     def _cur(m):
-        amt, sym, suf = m.group('amt'), m.group('sym'), m.group('cur')
+        sym = m.group('sym')
+        amt = m.group('amt') or m.group('amt2') or ''
+        suf = m.group('cur')
+        case_sfx = m.group('case') or ''
         if sym:
             cur = _BN_CURRENCY_NAMES.get(sym, 'টাকা')
         else:
@@ -1324,18 +1327,28 @@ def bangla_normalize_text(text):
             two = (_bn_to_ascii_digits(frac).replace(',', '') + '00')[:2]
             p = int(two)
             if p:
-                return (_bn_read_amount(whole_s) + ' ' + cur + ' ' +
+                return (_bn_read_amount(whole_s) + ' ' + cur + case_sfx + ' ' +
                         _BN0_99[p] + ' ' + coin)
-            return _bn_read_amount(whole_s) + ' ' + cur
+            return _bn_read_amount(whole_s) + ' ' + cur + case_sfx
         if n == 0:
-            return _BN0_99[0] + ' ' + cur
-        return _bn_num_words(n) + ' ' + cur
+            return _BN0_99[0] + ' ' + cur + case_sfx
+        return _bn_num_words(n) + ' ' + cur + case_sfx
 
     text = re.sub(
         r'(?P<sym>৳|₹|Tk|TK|BDT|\$|€|£|¥)\s*(?P<amt>[0-9০-৯]+(?:[,.][0-9০-৯]+)*)'
-        r'|(?P<amt2>[0-9০-৯]+(?:\.[0-9০-৯]+)?)\s*(?P<cur>টাকা|৳|Tk|TK|BDT)\b',
+        r'|(?P<amt2>[0-9০-৯]+(?:\.[0-9০-৯]+)?)\s*(?P<cur>টাকা|৳|Tk|TK|BDT)'
+        r'(?P<case>র|য়|তে)?(?=[\s।?!!!,;:—…॥]|$)',
         lambda m: _cur(m) if (m.group('amt') or m.group('amt2')) else m.group(0),
         text,
+    )
+
+    # Case-suffix dup guard: ৳১৫০ টাকার/টাকায় -> একশো পঞ্চাশ টাকার/টাকায়
+    # (never টাকা টাকার). The possessive র / locative য় splits onto the unit
+    # word. "টাকা টাকা করে" (bit-by-bit idiom) has NO case suffix so it
+    # survives untouched.
+    text = re.sub(
+        r'\s*(রুপি|টাকা|ডলার|ইউরো|পাউন্ড|ইয়েন)\s+\1(র|য়|তে)',
+        r' \1\2', text,
     )
 
     text = re.sub(
